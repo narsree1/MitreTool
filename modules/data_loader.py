@@ -185,12 +185,13 @@ def load_library_data_with_embeddings(_model):
                 descriptions.append(str(desc))  # Ensure it's a string
         
         # Use batching for encoding
-        batch_size = 16  # Reduced batch size for DeepSeek model which may be larger
+        batch_size = 16  # Smaller batch size for BGE models
         all_embeddings = []
         
         for i in range(0, len(descriptions), batch_size):
             batch = descriptions[i:i+batch_size]
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
+            # BGE models work best with normalize_embeddings=True
+            batch_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
             all_embeddings.append(batch_embeddings)
         
         # Combine all embeddings
