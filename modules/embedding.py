@@ -12,13 +12,20 @@ def load_model():
     """
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Using DeepSeek model instead of bge-base-en-v1.5
-        model = SentenceTransformer('deepseek-ai/deepseek-sentence-embedding-v1')
+        # Using BAAI/bge-large-en-v1.5, one of the top embedding models on the MTEB leaderboard
+        model = SentenceTransformer('BAAI/bge-large-en-v1.5')
         model = model.to(device)
         return model
     except Exception as e:
         st.error(f"Error loading embedding model: {e}")
-        return None
+        # Fallback to a smaller but still high-quality model
+        try:
+            model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            model = model.to(device)
+            return model
+        except Exception as fallback_error:
+            st.error(f"Error loading fallback model: {fallback_error}")
+            return None
 
 @st.cache_resource
 def get_mitre_embeddings(_model, techniques):
@@ -37,13 +44,14 @@ def get_mitre_embeddings(_model, techniques):
     try:
         descriptions = [tech['description'] for tech in techniques]
         
-        # Encode all descriptions in batches
-        batch_size = 32
+        # Encode all descriptions in batches - smaller batch size for larger models
+        batch_size = 16
         all_embeddings = []
         
         for i in range(0, len(descriptions), batch_size):
             batch = descriptions[i:i+batch_size]
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
+            # BGE models work best with normalize_embeddings=True
+            batch_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
             all_embeddings.append(batch_embeddings)
         
         # Combine all embeddings
@@ -76,7 +84,8 @@ def cosine_similarity_search(query_embedding, reference_embeddings):
     if len(query_embedding.shape) == 1:
         query_embedding = query_embedding.unsqueeze(0)
     
-    # Normalize the embeddings
+    # Normalize the embeddings - BGE models already normalize during encoding,
+    # but we'll normalize again just to be safe
     query_embedding = query_embedding / query_embedding.norm(dim=1, keepdim=True)
     reference_embeddings = reference_embeddings / reference_embeddings.norm(dim=1, keepdim=True)
     
