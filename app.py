@@ -45,7 +45,7 @@ if 'mitre_embeddings' not in st.session_state:
 if '_uploaded_file' not in st.session_state:
     st.session_state._uploaded_file = None
 if 'model_name' not in st.session_state:
-    st.session_state.model_name = "deepseek-ai/deepseek-sentence-embedding-v1"
+    st.session_state.model_name = "BAAI/bge-large-en-v1.5"
 
 # Render suggestions page
 def render_suggestions_page():
@@ -175,7 +175,7 @@ with st.sidebar:
     """)
     
     st.markdown("---")
-    st.markdown(f"© 2025 | v1.5.0 (DeepSeek Enhanced)")
+    st.markdown(f"© 2025 | v1.5.0 (BGE-Enhanced)")
 
 # Load the ML model and MITRE data
 model = load_model()
@@ -212,7 +212,7 @@ if st.session_state.page == "home":
         st.markdown("Upload a CSV file containing your security use cases. The file should include the columns: 'Use Case Name', 'Description', and 'Log Source'.")
         
         # Display model information
-        st.info(f"Using DeepSeek embedding model for improved accuracy: {st.session_state.model_name}")
+        st.info(f"Using BAAI/bge-large-en-v1.5 embedding model - one of the top-performing models on the MTEB benchmark for enhanced accuracy")
         
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv", key="file_upload")
         
@@ -240,7 +240,7 @@ if st.session_state.page == "home":
                     1. **Upload** your security use cases CSV file
                     2. The tool first **checks** if the use case exists in the library
                     3. If found in library, it uses the **pre-mapped** MITRE data
-                    4. If not found, it **analyzes** the use case using NLP and maps it
+                    4. If not found, it **analyzes** the use case using BGE-large-en-v1.5 embeddings
                     5. **View** mapped results, analytics, and export options
                     6. **Discover** additional relevant use cases based on your log sources
                     """)
@@ -254,7 +254,7 @@ if st.session_state.page == "home":
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
                     
                     if st.button("Start Mapping", key="start_mapping"):
-                        with st.spinner("Mapping security use cases to MITRE ATT&CK using DeepSeek embeddings..."):
+                        with st.spinner("Mapping security use cases to MITRE ATT&CK using BGE-large-en-v1.5 embeddings..."):
                             # Progress bar
                             progress_bar = st.progress(0)
                             start_time = time.time()
@@ -306,19 +306,19 @@ if st.session_state.page == "home":
             1. **Upload** your security use cases CSV file
             2. The tool first **checks** if the use case exists in the library
             3. If found in library, it uses the **pre-mapped** MITRE data
-            4. If not found, it **analyzes** the use case using DeepSeek embeddings and maps it
+            4. If not found, it **analyzes** the use case using advanced embeddings
             5. **View** mapped results, analytics, and export options
             6. **Discover** additional relevant use cases based on your log sources
             """)
         
-        with st.expander("🚀 Improvements with DeepSeek", expanded=True):
+        with st.expander("🚀 BGE-large-en-v1.5 Advantages", expanded=True):
             st.markdown("""
-            This version uses DeepSeek embeddings for improved mapping accuracy:
+            This version uses the BGE-large-en-v1.5 embedding model for improved mapping accuracy:
             
-            - **Better semantic understanding** of security terminology
-            - **Higher quality mappings** for techniques and tactics
-            - **Improved contextual awareness** for more accurate mapping
-            - **Enhanced similarity detection** between use cases and MITRE techniques
+            - **State-of-the-art performance** on the MTEB benchmark
+            - **Better semantic understanding** of security descriptions and techniques
+            - **Enhanced context awareness** for more accurate MITRE ATT&CK mapping
+            - **Improved similarity detection** for both library matching and model-based mapping
             """)
 
 # Results page
@@ -397,4 +397,108 @@ elif st.session_state.page == "results":
             st.session_state.page = "home"
             st.experimental_rerun()
 
-# Analytics, Suggestions, and Export pages remain the same...
+# Analytics page
+elif st.session_state.page == "analytics":
+    # Import visualization functions specifically for analytics page
+    from modules.visualizations import create_tactic_chart, create_technique_chart, create_source_chart, create_metrics_display
+    
+    st.markdown("# 📈 Coverage Analytics")
+    
+    if st.session_state.mapping_complete and st.session_state.processed_data is not None:
+        df = st.session_state.processed_data
+        techniques_count = st.session_state.techniques_count
+        
+        # Key metrics
+        total_techniques = 203  # Total number of MITRE techniques
+        covered_techniques = len(techniques_count.keys())
+        coverage_percent = round((covered_techniques / total_techniques) * 100, 2)
+        
+        # Count library matches vs model matches - handle NaN values safely
+        library_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('library', case=False, na=False)].shape[0]
+        model_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('embedding', case=False, na=False)].shape[0]
+        
+        # Display metrics
+        create_metrics_display(len(df), covered_techniques, coverage_percent, library_matches, model_matches)
+        
+        # Match source chart
+        st.markdown("### Mapping Source Distribution")
+        fig_source = create_source_chart(df)
+        if fig_source:
+            st.plotly_chart(fig_source, use_container_width=True)
+        else:
+            st.info("No mapping source data available for visualization.")
+        
+        # Coverage by Tactic chart
+        st.markdown("### Coverage by Tactic")
+        fig_tactic = create_tactic_chart(df)
+        if fig_tactic:
+            st.plotly_chart(fig_tactic, use_container_width=True)
+        else:
+            st.info("No tactic data available for visualization.")
+        
+        # Coverage by Technique chart
+        st.markdown("### Coverage by Technique")
+        fig_tech = create_technique_chart(df, techniques_count, mitre_techniques)
+        if fig_tech:
+            st.plotly_chart(fig_tech, use_container_width=True)
+        else:
+            st.info("No technique data available for visualization.")
+    
+    else:
+        st.info("No analytics data available. Please upload a CSV file on the Home page and complete the mapping process.")
+        
+        # Add a button to navigate back to home
+        if st.button("Go to Home"):
+            st.session_state.page = "home"
+            st.experimental_rerun()
+
+# Suggestions page
+elif st.session_state.page == "suggestions":
+    render_suggestions_page()
+
+# Export page
+elif st.session_state.page == "export":
+    st.markdown("# 💾 Export Navigator Layer")
+    
+    if st.session_state.mapping_complete and st.session_state.processed_data is not None:
+        df = st.session_state.processed_data
+        st.markdown("### MITRE ATT&CK Navigator Export")
+        
+        navigator_layer, layer_id = create_navigator_layer(st.session_state.techniques_count)
+        
+        st.markdown("""
+        The MITRE ATT&CK Navigator is an interactive visualization tool for exploring the MITRE ATT&CK framework.
+        
+        You can export your mapping results as a layer file to visualize in the Navigator.
+        """)
+        
+        st.download_button(
+            label="Download Navigator Layer JSON",
+            data=navigator_layer,
+            file_name="navigator_layer.json",
+            mime="application/json",
+            key="download_nav"
+        )
+        
+        st.markdown("### How to Use in MITRE ATT&CK Navigator")
+        
+        st.markdown("""
+        1. Download the Navigator Layer JSON using the button above
+        2. Visit the [MITRE ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/)
+        3. Click "Open Existing Layer" and then "Upload from Local"
+        4. Select the downloaded `navigator_layer.json` file
+        """)
+        
+        with st.expander("View Navigator Layer JSON"):
+            st.code(navigator_layer, language="json")
+    
+    else:
+        st.info("No export data available. Please upload a CSV file on the Home page and complete the mapping process.")
+        
+        # Add a button to navigate back to home
+        if st.button("Go to Home"):
+            st.session_state.page = "home"
+            st.experimental_rerun()
+
+if __name__ == '__main__':
+    pass  # Main app flow is handled through the Streamlit pages
