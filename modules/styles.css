@@ -1,0 +1,109 @@
+/* Modern Color Scheme */
+:root {
+    --primary: #0d6efd;
+    --secondary: #6c757d;
+    --success: #198754;
+    --danger: #dc3545;
+    --warning: #ffc107;
+    --info: #0dcaf0;
+    --background: #f8f9fa;
+    --card-bg: #ffffff;
+    --text: #212529;
+}
+
+/* Main elements */
+.main {
+    background-color: var(--background);
+    padding: 1.5rem;
+}
+
+/* Cards styling */
+.card {
+    background-color: var(--card-bg);
+    border-radius: 10px;
+    box-shadow: 0 3px 5px rgba(0, 0, 0, 0.1);
+    padding: 15px;
+    margin-bottom: 15px;
+}
+
+/* Modern button styles */
+.stButton button {
+    border-radius: 6px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+/* Header styling - reduced font size */
+h1 {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-weight: 600;
+    font-size: 1.8rem;
+}
+
+h2 {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-weight: 600;
+    font-size: 1.4rem;
+}
+
+h3 {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-weight: 600;
+    font-size: 1.2rem;
+}
+
+/* Smaller text everywhere */
+.stMarkdown, p, div, span, .stText {
+    font-size: 0.9rem;
+}
+
+/* Upload area styling */
+.uploadfile {
+    border: 2px dashed #0d6efd;
+    border-radius: 10px;
+    padding: 25px;
+    text-align: center;
+    background-color: rgba(13, 110, 253, 0.05);
+}
+
+/* Metrics styling */
+.metric-card {
+    background-color: var(--card-bg);
+    border-radius: 10px;
+    box-shadow: 0 3px 5px rgba(0, 0, 0, 0.1);
+    padding: 12px;
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.metric-card:hover {
+    transform: translateY(-3px);
+}
+
+.metric-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.metric-label {
+    font-size: 12px;
+    color: var(--secondary);
+}
+
+/* Table styling */
+.dataframe {
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 0.85rem;
+}
+
+/* Improve default slider styling */
+.stSlider div[data-baseweb="slider"] {
+    height: 5px;
+}
+
+/* Sidebar text smaller */
+.sidebar .stMarkdown {
+    font-size: 0.85rem;
+}
