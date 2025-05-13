@@ -9,8 +9,8 @@ def batch_check_library_matches(descriptions: List[str],
                               library_df: pd.DataFrame,
                               library_embeddings: torch.Tensor,
                               _model: SentenceTransformer,
-                              batch_size: int = 16,  # Reduced batch size for DeepSeek
-                              similarity_threshold: float = 0.75) -> List[Tuple]:  # Adjusted threshold for DeepSeek
+                              batch_size: int = 16,  # Smaller batch size for BGE models
+                              similarity_threshold: float = 0.85) -> List[Tuple]:  # BGE models tend to have higher similarity scores
     """
     Check for matches in the library in batches for better performance.
     
@@ -77,7 +77,8 @@ def batch_check_library_matches(descriptions: List[str],
     for i in range(0, len(valid_descriptions), batch_size):
         batch = valid_descriptions[i:i+batch_size]
         try:
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
+            # BGE models work best with normalize_embeddings=True
+            batch_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
             
             # Perform search for this batch using PyTorch
             for j, query_embedding in enumerate(batch_embeddings):
@@ -119,7 +120,7 @@ def batch_map_to_mitre(descriptions: List[str],
                       _model: SentenceTransformer, 
                       mitre_techniques: List[Dict], 
                       mitre_embeddings: torch.Tensor, 
-                      batch_size: int = 16) -> List[Tuple]:  # Reduced batch size for DeepSeek
+                      batch_size: int = 16) -> List[Tuple]:  # Smaller batch size for BGE models
     """
     Map a batch of descriptions to MITRE ATT&CK techniques for better performance
     
@@ -143,8 +144,8 @@ def batch_map_to_mitre(descriptions: List[str],
         batch = descriptions[i:i+batch_size]
         
         try:
-            # Encode query batch
-            query_embeddings = _model.encode(batch, convert_to_tensor=True)
+            # Encode query batch with normalize_embeddings=True for BGE models
+            query_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
             
             # Get best matches using batch similarity search
             best_scores, best_indices = batch_similarity_search(query_embeddings, mitre_embeddings)
@@ -192,8 +193,8 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
         df: Updated DataFrame with mapping results
         techniques_count: Dictionary counting occurrences of each technique
     """
-    # Adjusted similarity threshold for DeepSeek model (which may produce different embeddings)
-    similarity_threshold = 0.75
+    # Adjusted similarity threshold for BGE models - they tend to have higher scores
+    similarity_threshold = 0.85
     
     # Get all descriptions at once and validate them
     descriptions = []
@@ -297,7 +298,7 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 references[idx] = reference
                 all_tactics_lists[idx] = tactics_list
                 confidence_scores[idx] = round(confidence * 100, 2)
-                match_sources[idx] = "Model mapping (DeepSeek)"  # Updated to indicate DeepSeek model
+                match_sources[idx] = "BGE-large-en-v1.5 Embedding Model"  # Update to indicate the high-quality model
                 match_scores[idx] = 0  # No library match score
                 
                 # Count techniques
