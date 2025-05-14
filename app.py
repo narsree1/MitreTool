@@ -6,9 +6,10 @@ import json
 from streamlit_option_menu import option_menu
 from streamlit_lottie import st_lottie
 
-# Import modules
+# Import modules - updated to use TF-based modules
 from modules.data_loader import load_mitre_data, load_library_data_with_embeddings, create_local_mitre_data_cache
-from modules.embedding import load_sentence_transformer_model, load_claude_config, CLAUDE_MODELS
+from modules.embedding import load_sentence_transformer_model as load_encoder_model
+from modules.embedding import load_claude_config, CLAUDE_MODELS
 from modules.mapper import process_mappings, get_suggested_use_cases
 from modules.utils import load_lottie_url
 from modules.visualizations import create_navigator_layer
@@ -247,7 +248,7 @@ with st.sidebar:
             if use_claude:
                 st.success("Claude API will be used for mapping.")
             else:
-                st.info("Sentence Transformer will be used for mapping to save API credits.")
+                st.info("TensorFlow Encoder will be used for mapping to save API credits.")
         
         # Add estimated credit usage info
         st.markdown("#### Estimated API Usage")
@@ -257,7 +258,7 @@ with st.sidebar:
         **API Usage**:
         - {'HIGH ⚠️' if use_claude else 'LOW ✓'} ({"Uses" if use_claude else "Saves"} Claude API credits)
         - {'~~' if not use_claude else ''}Uses Claude API for mapping{'~~' if not use_claude else ''}
-        - {'✓' if not use_claude else ''}Uses SentenceTransformer for suggestions{'✓' if not use_claude else ''}
+        - {'✓' if not use_claude else ''}Uses TensorFlow for suggestions{'✓' if not use_claude else ''}
         """)
         
     else:
@@ -285,7 +286,7 @@ if not is_claude_api_configured():
         st.warning("⚠️ Claude API key is not configured. Please configure it in Streamlit Cloud secrets.")
 
 # Load the models
-st_model = load_sentence_transformer_model()
+st_model = load_encoder_model()
 claude_config = load_claude_config()
 
 # Get information about what model is being used for mapping
@@ -293,18 +294,18 @@ if claude_config and st.session_state.use_claude_for_mapping:
     current_model = f"Claude {claude_config.get('model_type', 'API').title()}"
     model_type = "claude"
 else:
-    current_model = "Sentence Transformer"
-    model_type = "transformer"
+    current_model = "TensorFlow Encoder"
+    model_type = "tensorflow"
 
 # Load MITRE data
 mitre_techniques, tactic_mapping, tactics_list = load_mitre_data()
 
-# Load MITRE embeddings (use SentenceTransformer for this to save API credits)
+# Load MITRE embeddings (use TensorFlow for this to save API credits)
 from modules.embedding import get_mitre_embeddings
 mitre_embeddings = get_mitre_embeddings(st_model, claude_config, mitre_techniques, use_claude_api=False)
 st.session_state.mitre_embeddings = mitre_embeddings
 
-# Load library data with optimized embedding search (use SentenceTransformer to save API credits)
+# Load library data with optimized embedding search (use TensorFlow to save API credits)
 library_df, library_embeddings = load_library_data_with_embeddings(st_model, claude_config, use_claude_for_library=False)
 if library_df is not None:
     st.session_state.library_data = library_df
@@ -342,7 +343,7 @@ if st.session_state.page == "home":
         st.info(f"""
         **Current Mapping Model**: {current_model}
         
-        {'✅ Using Sentence Transformer for Suggestions (saves API credits)' if model_type == 'transformer' or not st.session_state.use_claude_for_mapping else '⚠️ Using Claude API (consumes API credits)'}
+        {'✅ Using TensorFlow for Suggestions (saves API credits)' if model_type == 'tensorflow' or not st.session_state.use_claude_for_mapping else '⚠️ Using Claude API (consumes API credits)'}
         
         *You can change these settings in the sidebar.*
         """)
@@ -400,7 +401,7 @@ if st.session_state.page == "home":
                     
                     # Check if Claude API is configured
                     if not is_claude_api_configured() and st.session_state.use_claude_for_mapping:
-                        st.warning("⚠️ Claude API key is not configured. Mapping will use Sentence Transformer with lower accuracy.")
+                        st.warning("⚠️ Claude API key is not configured. Mapping will use TensorFlow Encoder with lower accuracy.")
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -468,10 +469,10 @@ if st.session_state.page == "home":
             st.markdown("""
             This tool is optimized to minimize Claude API usage:
             
-            - **Library Matching**: Uses Sentence Transformer (free) instead of Claude API
-            - **Suggestions**: Uses Sentence Transformer to save API credits
-            - **MITRE Embeddings**: Pre-computed once using Sentence Transformer
-            - **Mapping**: Can use either Claude API (higher accuracy) or Sentence Transformer (no API cost)
+            - **Library Matching**: Uses TensorFlow (free) instead of Claude API
+            - **Suggestions**: Uses TensorFlow to save API credits
+            - **MITRE Embeddings**: Pre-computed once using TensorFlow
+            - **Mapping**: Can use either Claude API (higher accuracy) or TensorFlow (no API cost)
             - **Model Selection**: Choose from Haiku (lowest cost), Sonnet, or Opus based on your needs
             
             You can configure these settings in the sidebar to balance accuracy vs. API usage.
