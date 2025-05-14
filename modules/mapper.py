@@ -1,24 +1,25 @@
 from typing import List, Dict, Tuple, Any, Optional
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 import torch
+import streamlit as st
+import numpy as np
 
-from modules.embedding import cosine_similarity_search, batch_similarity_search
+from modules.embedding import cosine_similarity_search, batch_similarity_search, batch_get_embeddings
 
 def batch_check_library_matches(descriptions: List[str], 
                               library_df: pd.DataFrame,
                               library_embeddings: torch.Tensor,
-                              _model: SentenceTransformer,
-                              batch_size: int = 16,  # Smaller batch size for BGE models
-                              similarity_threshold: float = 0.85) -> List[Tuple]:  # BGE models tend to have higher similarity scores
+                              _model: Dict[str, Any],  # Now expects Claude API config
+                              batch_size: int = 32,
+                              similarity_threshold: float = 0.8) -> List[Tuple]:
     """
-    Check for matches in the library in batches for better performance.
+    Check for matches in the library in batches using Claude embeddings.
     
     Args:
         descriptions: List of use case descriptions to match
         library_df: DataFrame containing library data
         library_embeddings: Tensor of embeddings for library descriptions
-        _model: SentenceTransformer model for creating embeddings
+        _model: Claude API configuration dictionary
         batch_size: Number of descriptions to process at once
         similarity_threshold: Minimum similarity score to consider a match
         
@@ -73,30 +74,26 @@ def batch_check_library_matches(descriptions: List[str],
     if not valid_descriptions:
         return [exact_matches.get(i, (None, 0.0, "No match found in library")) for i in range(len(descriptions))]
     
-    # Encode in batches
-    for i in range(0, len(valid_descriptions), batch_size):
-        batch = valid_descriptions[i:i+batch_size]
-        try:
-            # BGE models work best with normalize_embeddings=True
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
+    # Get embeddings using Claude API
+    query_embeddings = batch_get_embeddings(valid_descriptions, _model)
+    
+    if query_embeddings is not None:
+        # Perform batch similarity search (entire batch at once for efficiency)
+        best_scores, best_indices = batch_similarity_search(query_embeddings, library_embeddings)
+        
+        # Process the results
+        for i, (score, idx) in enumerate(zip(best_scores, best_indices)):
+            orig_idx = valid_indices[i]
             
-            # Perform search for this batch using PyTorch
-            for j, query_embedding in enumerate(batch_embeddings):
-                best_score, best_idx = cosine_similarity_search(query_embedding, library_embeddings)
-                
-                orig_idx = valid_indices[i + j]
-                
-                if best_score >= similarity_threshold:
-                    results.append((orig_idx, (library_df.iloc[best_idx], best_score, 
-                                f"Similar match found in library (score: {best_score:.2f})")))
-                else:
-                    results.append((orig_idx, (None, 0.0, "No match found in library")))
-        except Exception as e:
-            # Handle encoding errors
-            for j in range(len(batch)):
-                if i+j < len(valid_indices):
-                    orig_idx = valid_indices[i + j]
-                    results.append((orig_idx, (None, 0.0, f"Error during embedding: {str(e)}")))
+            if score >= similarity_threshold:
+                results.append((orig_idx, (library_df.iloc[idx], score, 
+                            f"Similar match found in library (score: {score:.2f})")))
+            else:
+                results.append((orig_idx, (None, 0.0, "No match found in library")))
+    else:
+        # Handle case where embeddings generation failed
+        for idx in valid_indices:
+            results.append((idx, (None, 0.0, "Failed to generate embeddings for comparison")))
     
     # Combine exact matches and embedding-based matches
     all_results = []
@@ -117,16 +114,16 @@ def batch_check_library_matches(descriptions: List[str],
     return all_results
 
 def batch_map_to_mitre(descriptions: List[str], 
-                      _model: SentenceTransformer, 
+                      _model: Dict[str, Any],  # Now expects Claude API config
                       mitre_techniques: List[Dict], 
                       mitre_embeddings: torch.Tensor, 
-                      batch_size: int = 16) -> List[Tuple]:  # Smaller batch size for BGE models
+                      batch_size: int = 32) -> List[Tuple]:
     """
-    Map a batch of descriptions to MITRE ATT&CK techniques for better performance
+    Map a batch of descriptions to MITRE ATT&CK techniques using Claude API
     
     Args:
         descriptions: List of use case descriptions to map
-        _model: SentenceTransformer model for creating embeddings
+        _model: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
         mitre_embeddings: Tensor of embeddings for technique descriptions
         batch_size: Number of descriptions to process at once
@@ -139,19 +136,24 @@ def batch_map_to_mitre(descriptions: List[str],
     
     results = []
     
-    # Process in batches
-    for i in range(0, len(descriptions), batch_size):
-        batch = descriptions[i:i+batch_size]
+    # First, check if the Claude API is available and properly configured
+    if not _model.get("api_key"):
+        st.warning("Claude API key not available. Using fallback mapping.")
+        # Return basic fallback values
+        for _ in descriptions:
+            results.append(("N/A", "N/A", "N/A", [], 0.0))
+        return results
+    
+    # Generate embeddings for all descriptions using Claude API
+    query_embeddings = batch_get_embeddings(descriptions, _model)
+    
+    if query_embeddings is not None:
+        # Perform similarity search against MITRE techniques
+        best_scores, best_indices = batch_similarity_search(query_embeddings, mitre_embeddings)
         
-        try:
-            # Encode query batch with normalize_embeddings=True for BGE models
-            query_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
-            
-            # Get best matches using batch similarity search
-            best_scores, best_indices = batch_similarity_search(query_embeddings, mitre_embeddings)
-            
-            # Process results
-            for j, (score, idx) in enumerate(zip(best_scores, best_indices)):
+        # Process results
+        for i, (score, idx) in enumerate(zip(best_scores, best_indices)):
+            if idx < len(mitre_techniques):
                 best_tech = mitre_techniques[idx]
                 
                 # FIX: Convert tactic to Title Case
@@ -167,23 +169,23 @@ def batch_map_to_mitre(descriptions: List[str],
                     [t.title() for t in best_tech['tactics_list']],  # Capitalize tactics in list
                     score
                 ))
-                
-        except Exception as e:
-            # Handle errors
-            print(f"Error mapping batch to MITRE: {e}")
-            # Fill with error values for this batch
-            for _ in range(len(batch)):
+            else:
+                # Handle index out of range
                 results.append(("Error", "Error", "Error", [], 0.0))
+    else:
+        # Handle case where embeddings generation failed
+        for _ in descriptions:
+            results.append(("Error", "Error", "Error", [], 0.0))
     
     return results
 
 def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
     """
-    Main function to process mappings in an optimized way
+    Main function to process mappings using Claude API
     
     Args:
         df: DataFrame containing security use cases to map
-        _model: SentenceTransformer model for creating embeddings
+        _model: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
         mitre_embeddings: Tensor of embeddings for technique descriptions
         library_df: DataFrame containing library data
@@ -193,8 +195,8 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
         df: Updated DataFrame with mapping results
         techniques_count: Dictionary counting occurrences of each technique
     """
-    # Adjusted similarity threshold for BGE models - they tend to have higher scores
-    similarity_threshold = 0.85
+    # Adjust similarity threshold for Claude embeddings
+    similarity_threshold = 0.75  # A slightly lower threshold may work better with Claude embeddings
     
     # Get all descriptions at once and validate them
     descriptions = []
@@ -281,7 +283,10 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 # Invalid description placeholders are already set by default
                 match_sources[i] = "Invalid description"
     
-    # Batch map remaining cases using model
+    # Label for Claude mapping
+    mapping_label = "Claude API mapping"
+    
+    # Batch map remaining cases using Claude API
     if model_map_descriptions:
         model_results = batch_map_to_mitre(
             model_map_descriptions, _model, mitre_techniques, mitre_embeddings
@@ -298,7 +303,7 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 references[idx] = reference
                 all_tactics_lists[idx] = tactics_list
                 confidence_scores[idx] = round(confidence * 100, 2)
-                match_sources[idx] = "BGE-large-en-v1.5 Embedding Model"  # Update to indicate the high-quality model
+                match_sources[idx] = mapping_label
                 match_scores[idx] = 0  # No library match score
                 
                 # Count techniques
