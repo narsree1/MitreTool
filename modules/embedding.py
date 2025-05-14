@@ -4,41 +4,74 @@ import requests
 import json
 import numpy as np
 from typing import List, Dict, Any, Optional, Union
+from sentence_transformers import SentenceTransformer
 
 # Claude API configuration constants
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
-CLAUDE_MODEL = "claude-3-opus-20240229"
+
+# Available Claude models
+CLAUDE_MODELS = {
+    "haiku": "claude-3-haiku-20240307",   # Faster, cheaper model
+    "sonnet": "claude-3-sonnet-20240229", # Balanced model
+    "opus": "claude-3-opus-20240229"      # Most powerful model
+}
 
 @st.cache_resource
-def load_model():
+def load_sentence_transformer_model():
     """
-    Returns a dummy model object that contains Claude API connection details
+    Load the sentence transformer model for embeddings
     
     Returns:
-        model: A dictionary with Claude API configuration
+        model: The loaded SentenceTransformer model
+    """
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Using bge-base-en-v1.5 model instead of all-mpnet-base-v2 for better performance
+        model = SentenceTransformer('BAAI/bge-base-en-v1.5')
+        model = model.to(device)
+        return model
+    except Exception as e:
+        st.error(f"Error loading sentence transformer model: {e}")
+        return None
+
+@st.cache_resource
+def load_claude_config():
+    """
+    Returns a config object with Claude API connection details
+    
+    Returns:
+        model_config: A dictionary with Claude API configuration
     """
     try:
         # Check if Claude API key is set in Streamlit secrets
         api_key = st.secrets.get("claude", {}).get("api_key", "")
         
         if not api_key:
-            st.warning("Claude API key not found in secrets. Please configure it in Streamlit Cloud.")
             return None
             
+        # Use the claude_model from secrets if available, otherwise default to "haiku"
+        model_type = st.secrets.get("claude", {}).get("model", "haiku").lower()
+        
+        # Make sure the model type is valid
+        if model_type not in CLAUDE_MODELS:
+            model_type = "haiku"  # Default to haiku if invalid model type
+            
         # Return a config object instead of an actual model
-        model = {
+        model_config = {
             "api_key": api_key,
             "api_url": CLAUDE_API_URL,
-            "model": CLAUDE_MODEL
+            "model": CLAUDE_MODELS[model_type],
+            "model_type": model_type
         }
-        return model
+        return model_config
     except Exception as e:
         st.error(f"Error configuring Claude API: {e}")
         return None
 
-def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optional[np.ndarray]:
+@st.cache_data(ttl=3600)  # Cache for 1 hour to reduce API calls
+def get_embedding_with_claude(text: str, model_config: Dict[str, Any]) -> Optional[np.ndarray]:
     """
-    Get embedding for a text using Claude API
+    Get embedding for a text using Claude API with caching
     
     Args:
         text: Text to embed
@@ -60,7 +93,7 @@ def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optio
         
         # Format the request with the text to embed
         payload = {
-            "model": model_config.get("model", CLAUDE_MODEL),
+            "model": model_config.get("model", CLAUDE_MODELS["haiku"]),
             "messages": [
                 {"role": "user", "content": f"Create an embedding for the following text: {text}"}
             ],
@@ -78,7 +111,6 @@ def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optio
             response_data = response.json()
             # In real implementation, extract actual embedding from Claude's response
             # For now, we'll create a deterministic pseudo-embedding based on text hash
-            # NOTE: This is a simplified approach - in production, you would parse the actual embedding
             hash_val = hash(text) % 10000
             np.random.seed(hash_val)
             embedding = np.random.randn(1536)  # Using 1536-dim embedding similar to other LLMs
@@ -91,38 +123,83 @@ def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optio
         st.error(f"Error getting embedding from Claude: {e}")
         return None
 
-@st.cache_data(ttl=3600)  # Cache for 1 hour to reduce API calls
-def get_embedding_with_cache(text: str, model_config: Dict[str, Any]) -> Optional[np.ndarray]:
+def get_embedding_with_transformer(text: str, model) -> Optional[np.ndarray]:
     """
-    Get embedding for a text using Claude API with caching
+    Get embedding for a text using sentence transformer
     
     Args:
         text: Text to embed
-        model_config: Dictionary with Claude API configuration
+        model: SentenceTransformer model
         
     Returns:
         embedding: Numpy array of embedding vector or None if failed
     """
-    return _get_embedding_from_claude(text, model_config)
-
-def batch_get_embeddings(texts: List[str], model_config: Dict[str, Any]) -> Optional[torch.Tensor]:
-    """
-    Get embeddings for multiple texts using Claude API
-    
-    Args:
-        texts: List of texts to embed
-        model_config: Dictionary with Claude API configuration
-        
-    Returns:
-        embeddings: Tensor of embedding vectors or None if failed
-    """
-    if not model_config or not model_config.get("api_key"):
+    if model is None:
         return None
         
     try:
-        # Process in batches
+        embedding = model.encode(text, convert_to_numpy=True)
+        return embedding
+    except Exception as e:
+        st.error(f"Error getting embedding from transformer: {e}")
+        return None
+
+def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[torch.Tensor]:
+    """
+    Get embeddings for multiple texts using sentence transformer
+    
+    Args:
+        texts: List of texts to embed
+        model: SentenceTransformer model
+        
+    Returns:
+        embeddings: Tensor of embedding vectors
+    """
+    if model is None:
+        return None
+        
+    try:
+        # Use batching for encoding
+        batch_size = 32
         all_embeddings = []
-        batch_size = 5  # Small batch size to avoid rate limits
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            batch_embeddings = model.encode(batch, convert_to_tensor=True)
+            all_embeddings.append(batch_embeddings)
+        
+        # Combine all embeddings
+        if all_embeddings:
+            embeddings = torch.cat(all_embeddings, dim=0)
+            return embeddings
+        return None
+    except Exception as e:
+        st.error(f"Error computing batch embeddings: {e}")
+        return None
+
+def batch_get_embeddings_hybrid(texts: List[str], st_model, claude_config: Dict[str, Any], 
+                              use_claude_api: bool = False) -> Optional[torch.Tensor]:
+    """
+    Get embeddings for multiple texts using either sentence transformer or Claude API
+    
+    Args:
+        texts: List of texts to embed
+        st_model: SentenceTransformer model
+        claude_config: Dictionary with Claude API configuration
+        use_claude_api: Whether to use Claude API (for critical mapping) or sentence transformer
+        
+    Returns:
+        embeddings: Tensor of embedding vectors
+    """
+    # For suggestions and other non-critical features, use sentence transformer
+    if not use_claude_api or claude_config is None:
+        return batch_get_embeddings_with_transformer(texts, st_model)
+    
+    # For critical mapping features, use Claude API
+    try:
+        # Process in batches to avoid rate limits
+        all_embeddings = []
+        batch_size = 5  # Small batch size for Claude API
         
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
@@ -130,15 +207,20 @@ def batch_get_embeddings(texts: List[str], model_config: Dict[str, Any]) -> Opti
             
             for text in batch:
                 # Use cached version to reduce API calls
-                embedding = get_embedding_with_cache(text, model_config)
+                embedding = get_embedding_with_claude(text, claude_config)
                 if embedding is not None:
                     batch_embeddings.append(embedding)
                 else:
-                    # If any embedding fails, return a random one as fallback
-                    np.random.seed(0)
-                    fallback = np.random.randn(1536)
-                    fallback = fallback / np.linalg.norm(fallback)
-                    batch_embeddings.append(fallback)
+                    # If Claude API fails, fall back to sentence transformer
+                    fallback = get_embedding_with_transformer(text, st_model)
+                    if fallback is not None:
+                        batch_embeddings.append(fallback)
+                    else:
+                        # Last resort: random fallback
+                        np.random.seed(0)
+                        fallback = np.random.randn(1536)
+                        fallback = fallback / np.linalg.norm(fallback)
+                        batch_embeddings.append(fallback)
             
             # Convert batch to tensor and append
             batch_tensor = torch.tensor(np.array(batch_embeddings))
@@ -150,26 +232,31 @@ def batch_get_embeddings(texts: List[str], model_config: Dict[str, Any]) -> Opti
             return embeddings
         return None
     except Exception as e:
-        st.error(f"Error computing batch embeddings: {e}")
+        st.error(f"Error computing hybrid batch embeddings: {e}")
         return None
 
 @st.cache_resource
-def get_mitre_embeddings(_model, techniques):
+def get_mitre_embeddings(st_model, claude_config, techniques, use_claude_api=False):
     """
     Generate embeddings for MITRE technique descriptions
     
     Args:
-        _model: Claude API configuration
+        st_model: SentenceTransformer model
+        claude_config: Claude API configuration
         techniques: List of MITRE technique dictionaries
+        use_claude_api: Whether to use Claude API for embeddings
         
     Returns:
         embeddings: Tensor of embeddings for technique descriptions
     """
-    if _model is None or not techniques:
+    if (st_model is None and claude_config is None) or not techniques:
         return None
     try:
         descriptions = [tech['description'] for tech in techniques]
-        return batch_get_embeddings(descriptions, _model)
+        
+        # Use the hybrid approach - can use sentence transformer for MITRE techniques 
+        # since these are fixed and don't need Claude's advanced understanding
+        return batch_get_embeddings_hybrid(descriptions, st_model, claude_config, use_claude_api=False)
     except Exception as e:
         st.error(f"Error computing MITRE embeddings: {e}")
         return None
