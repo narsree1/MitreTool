@@ -4,7 +4,6 @@ import traceback
 import pandas as pd
 import requests
 import streamlit as st
-import torch  # Keep torch import
 import numpy as np
 
 def create_local_mitre_data_cache():
@@ -64,14 +63,9 @@ def load_mitre_data():
             )
             response.raise_for_status()  # Raise an exception for 4XX/5XX responses
             attack_data = response.json()
-            # Remove success message
-            # st.success("Successfully loaded MITRE data from primary source")
         except Exception as primary_error:
             # If primary URL fails, try a fallback URL
             try:
-                # Replace warning with info that doesn't show to the user
-                # st.warning(f"Primary MITRE data source failed: {primary_error}. Trying fallback source...")
-                
                 # Fallback to a different version/branch or a cached copy
                 response = requests.get(
                     "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json",
@@ -80,8 +74,6 @@ def load_mitre_data():
                 )
                 response.raise_for_status()
                 attack_data = response.json()
-                # Remove success message
-                # st.success("Successfully loaded MITRE data from fallback source")
             except Exception as fallback_error:
                 # If both online sources fail, use the local cache
                 st.warning(f"MITRE data sources unavailable. Using local cache...")
@@ -130,9 +122,6 @@ def load_mitre_data():
                     'url': ext_refs[0].get('url', '')
                 })
         
-        # Remove success message
-        # st.success(f"Successfully processed MITRE ATT&CK data: {len(techniques)} techniques, {len(tactics_list)} tactics")
-        
         return techniques, tactic_mapping, tactics_list
     
     except Exception as e:
@@ -146,16 +135,18 @@ def load_mitre_data():
         return [], {}, []
 
 @st.cache_data
-def load_library_data_with_embeddings(_model):
+def load_library_data_with_embeddings(st_model, claude_config=None, use_claude_for_library=False):
     """
-    Load library data and compute embeddings using Claude API
+    Load library data and compute embeddings
     
     Args:
-        _model: Claude API configuration dict
+        st_model: TensorFlow-based encoder model
+        claude_config: Claude API configuration dict (optional)
+        use_claude_for_library: Whether to use Claude API for library embeddings
         
     Returns:
         library_df: DataFrame containing library data
-        embeddings: Tensor of embeddings for library descriptions
+        embeddings: Array of embeddings for library descriptions
     """
     try:
         # Read library.csv file
@@ -177,13 +168,13 @@ def load_library_data_with_embeddings(_model):
             if library_df[col].dtype == 'object':
                 library_df[col] = library_df[col].fillna("N/A")
         
-        # Check if Claude API is configured properly
-        if _model is None:
-            st.warning("Claude API not configured. Library matching may be unavailable.")
+        # Check if embedding models are available
+        if st_model is None and (claude_config is None or not claude_config.get("api_key")):
+            st.warning("No embedding models available. Library matching may be unavailable.")
             return library_df, None
         
-        # Import the batch_get_embeddings function for Claude API embeddings
-        from modules.embedding import batch_get_embeddings
+        # Import the batch_get_embeddings_hybrid function for embeddings
+        from modules.embedding import batch_get_embeddings_hybrid
         
         # Precompute embeddings for all library entries
         descriptions = []
@@ -193,8 +184,14 @@ def load_library_data_with_embeddings(_model):
             else:
                 descriptions.append(str(desc))  # Ensure it's a string
         
-        # Use Claude API to get embeddings
-        embeddings = batch_get_embeddings(descriptions, _model)
+        # Use the hybrid approach - normally use transformer for library 
+        # to save on Claude API credits
+        embeddings = batch_get_embeddings_hybrid(
+            descriptions, 
+            st_model, 
+            claude_config, 
+            use_claude_api=use_claude_for_library
+        )
         
         if embeddings is not None:
             return library_df, embeddings
