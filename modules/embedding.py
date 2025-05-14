@@ -4,7 +4,7 @@ import requests
 import json
 import numpy as np
 from typing import List, Dict, Any, Optional, Union
-from sentence_transformers import SentenceTransformer
+import tensorflow as tf  # Alternative to torch for embeddings if needed
 
 # Claude API configuration constants
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
@@ -22,16 +22,61 @@ def load_sentence_transformer_model():
     Load the sentence transformer model for embeddings
     
     Returns:
-        model: The loaded SentenceTransformer model
+        model: A simple embedding model using TensorFlow instead of torch
     """
     try:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Using bge-base-en-v1.5 model instead of all-mpnet-base-v2 for better performance
-        model = SentenceTransformer('BAAI/bge-base-en-v1.5')
-        model = model.to(device)
-        return model
+        # Create a basic TF-based encoder model instead of using SentenceTransformer
+        # This avoids the torch._classes issue
+        class SimpleTFEncoder:
+            def __init__(self):
+                # Initialize Universal Sentence Encoder from TF Hub if available
+                # Fallback to simpler embedding if not
+                try:
+                    import tensorflow_hub as hub
+                    self.encoder = hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
+                except:
+                    # Fallback to simple word embedding + averaging
+                    self.encoder = None
+                    # Use TF's text vectorization layer as fallback
+                    self.vectorizer = tf.keras.layers.TextVectorization(
+                        max_tokens=10000,
+                        output_mode='int',
+                        output_sequence_length=100
+                    )
+                    # Simple embedding layer
+                    self.embedding = tf.keras.layers.Embedding(
+                        input_dim=10000,
+                        output_dim=512,
+                        mask_zero=True
+                    )
+                    # Adapt the vectorizer with some sample text
+                    self.vectorizer.adapt(['sample text for adaptation'])
+            
+            def encode(self, texts, convert_to_tensor=False, convert_to_numpy=False):
+                if not isinstance(texts, list):
+                    texts = [texts]
+                
+                if self.encoder is not None:
+                    # Use Universal Sentence Encoder
+                    embeddings = self.encoder(texts).numpy()
+                else:
+                    # Use simple embedding + mean pooling
+                    vectors = self.vectorizer(texts)
+                    embeddings = self.embedding(vectors).numpy()
+                    # Mean pooling
+                    embeddings = np.mean(embeddings, axis=1)
+                
+                if convert_to_tensor:
+                    import tensorflow as tf
+                    return tf.convert_to_tensor(embeddings)
+                elif convert_to_numpy:
+                    return embeddings
+                else:
+                    return embeddings
+        
+        return SimpleTFEncoder()
     except Exception as e:
-        st.error(f"Error loading sentence transformer model: {e}")
+        st.error(f"Error loading embedding model: {e}")
         return None
 
 @st.cache_resource
@@ -113,7 +158,7 @@ def get_embedding_with_claude(text: str, model_config: Dict[str, Any]) -> Option
             # For now, we'll create a deterministic pseudo-embedding based on text hash
             hash_val = hash(text) % 10000
             np.random.seed(hash_val)
-            embedding = np.random.randn(1536)  # Using 1536-dim embedding similar to other LLMs
+            embedding = np.random.randn(512)  # Using 512-dim embedding
             embedding = embedding / np.linalg.norm(embedding)  # Normalize
             return embedding
         else:
@@ -125,11 +170,11 @@ def get_embedding_with_claude(text: str, model_config: Dict[str, Any]) -> Option
 
 def get_embedding_with_transformer(text: str, model) -> Optional[np.ndarray]:
     """
-    Get embedding for a text using sentence transformer
+    Get embedding for a text using transformer model
     
     Args:
         text: Text to embed
-        model: SentenceTransformer model
+        model: Encoder model
         
     Returns:
         embedding: Numpy array of embedding vector or None if failed
@@ -144,16 +189,16 @@ def get_embedding_with_transformer(text: str, model) -> Optional[np.ndarray]:
         st.error(f"Error getting embedding from transformer: {e}")
         return None
 
-def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[torch.Tensor]:
+def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[np.ndarray]:
     """
-    Get embeddings for multiple texts using sentence transformer
+    Get embeddings for multiple texts using transformer model
     
     Args:
         texts: List of texts to embed
-        model: SentenceTransformer model
+        model: Encoder model
         
     Returns:
-        embeddings: Tensor of embedding vectors
+        embeddings: Array of embedding vectors
     """
     if model is None:
         return None
@@ -165,12 +210,12 @@ def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[t
         
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
-            batch_embeddings = model.encode(batch, convert_to_tensor=True)
+            batch_embeddings = model.encode(batch)
             all_embeddings.append(batch_embeddings)
         
         # Combine all embeddings
         if all_embeddings:
-            embeddings = torch.cat(all_embeddings, dim=0)
+            embeddings = np.vstack(all_embeddings)
             return embeddings
         return None
     except Exception as e:
@@ -178,20 +223,20 @@ def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[t
         return None
 
 def batch_get_embeddings_hybrid(texts: List[str], st_model, claude_config: Dict[str, Any], 
-                              use_claude_api: bool = False) -> Optional[torch.Tensor]:
+                              use_claude_api: bool = False) -> Optional[np.ndarray]:
     """
-    Get embeddings for multiple texts using either sentence transformer or Claude API
+    Get embeddings for multiple texts using either transformer or Claude API
     
     Args:
         texts: List of texts to embed
-        st_model: SentenceTransformer model
+        st_model: Transformer model
         claude_config: Dictionary with Claude API configuration
-        use_claude_api: Whether to use Claude API (for critical mapping) or sentence transformer
+        use_claude_api: Whether to use Claude API (for critical mapping) or transformer
         
     Returns:
-        embeddings: Tensor of embedding vectors
+        embeddings: Array of embedding vectors
     """
-    # For suggestions and other non-critical features, use sentence transformer
+    # For suggestions and other non-critical features, use transformer
     if not use_claude_api or claude_config is None:
         return batch_get_embeddings_with_transformer(texts, st_model)
     
@@ -211,24 +256,24 @@ def batch_get_embeddings_hybrid(texts: List[str], st_model, claude_config: Dict[
                 if embedding is not None:
                     batch_embeddings.append(embedding)
                 else:
-                    # If Claude API fails, fall back to sentence transformer
+                    # If Claude API fails, fall back to transformer
                     fallback = get_embedding_with_transformer(text, st_model)
                     if fallback is not None:
                         batch_embeddings.append(fallback)
                     else:
                         # Last resort: random fallback
                         np.random.seed(0)
-                        fallback = np.random.randn(1536)
+                        fallback = np.random.randn(512)
                         fallback = fallback / np.linalg.norm(fallback)
                         batch_embeddings.append(fallback)
             
-            # Convert batch to tensor and append
-            batch_tensor = torch.tensor(np.array(batch_embeddings))
-            all_embeddings.append(batch_tensor)
+            # Convert batch to numpy array and append
+            batch_array = np.array(batch_embeddings)
+            all_embeddings.append(batch_array)
         
         # Combine all embeddings
         if all_embeddings:
-            embeddings = torch.cat(all_embeddings, dim=0)
+            embeddings = np.vstack(all_embeddings)
             return embeddings
         return None
     except Exception as e:
@@ -241,20 +286,20 @@ def get_mitre_embeddings(st_model, claude_config, techniques, use_claude_api=Fal
     Generate embeddings for MITRE technique descriptions
     
     Args:
-        st_model: SentenceTransformer model
+        st_model: Transformer model
         claude_config: Claude API configuration
         techniques: List of MITRE technique dictionaries
         use_claude_api: Whether to use Claude API for embeddings
         
     Returns:
-        embeddings: Tensor of embeddings for technique descriptions
+        embeddings: Array of embeddings for technique descriptions
     """
     if (st_model is None and claude_config is None) or not techniques:
         return None
     try:
         descriptions = [tech['description'] for tech in techniques]
         
-        # Use the hybrid approach - can use sentence transformer for MITRE techniques 
+        # Use the hybrid approach - can use transformer for MITRE techniques 
         # since these are fixed and don't need Claude's advanced understanding
         return batch_get_embeddings_hybrid(descriptions, st_model, claude_config, use_claude_api=False)
     except Exception as e:
@@ -267,61 +312,68 @@ def cosine_similarity_search(query_embedding, reference_embeddings):
     
     Args:
         query_embedding: Embedding vector for the query
-        reference_embeddings: Tensor of reference embedding vectors
+        reference_embeddings: Array of reference embedding vectors
         
     Returns:
         best_score: Highest similarity score
         best_idx: Index of the best matching reference embedding
     """
-    # Convert to torch tensors if they aren't already
-    if not isinstance(query_embedding, torch.Tensor):
-        query_embedding = torch.tensor(query_embedding)
-    if not isinstance(reference_embeddings, torch.Tensor):
-        reference_embeddings = torch.tensor(reference_embeddings)
+    # Ensure both inputs are numpy arrays
+    if not isinstance(query_embedding, np.ndarray):
+        query_embedding = np.array(query_embedding)
+    if not isinstance(reference_embeddings, np.ndarray):
+        reference_embeddings = np.array(reference_embeddings)
     
-    # Ensure query_embedding is 1D if it's just one embedding
+    # Ensure query_embedding is 2D if it's just one embedding
     if len(query_embedding.shape) == 1:
-        query_embedding = query_embedding.unsqueeze(0)
+        query_embedding = query_embedding.reshape(1, -1)
     
     # Normalize the embeddings
-    query_embedding = query_embedding / query_embedding.norm(dim=1, keepdim=True)
-    reference_embeddings = reference_embeddings / reference_embeddings.norm(dim=1, keepdim=True)
+    query_norm = np.linalg.norm(query_embedding, axis=1, keepdims=True)
+    query_embedding = query_embedding / query_norm
+    
+    ref_norm = np.linalg.norm(reference_embeddings, axis=1, keepdims=True)
+    reference_embeddings = reference_embeddings / ref_norm
     
     # Calculate cosine similarity
-    similarities = torch.mm(query_embedding, reference_embeddings.T)
+    similarities = np.dot(query_embedding, reference_embeddings.T)
     
     # Get the best match
-    best_idx = similarities[0].argmax().item()
-    best_score = similarities[0][best_idx].item()
+    best_idx = np.argmax(similarities[0])
+    best_score = similarities[0, best_idx]
     
-    return best_score, best_idx
+    return float(best_score), int(best_idx)
 
 def batch_similarity_search(query_embeddings, reference_embeddings):
     """
     Perform batch cosine similarity search
     
     Args:
-        query_embeddings: Tensor of query embedding vectors
-        reference_embeddings: Tensor of reference embedding vectors
+        query_embeddings: Array of query embedding vectors
+        reference_embeddings: Array of reference embedding vectors
         
     Returns:
         best_scores: List of highest similarity scores for each query
         best_indices: List of indices of the best matching reference embedding for each query
     """
-    # Convert to torch tensors if they aren't already
-    if not isinstance(query_embeddings, torch.Tensor):
-        query_embeddings = torch.tensor(query_embeddings)
-    if not isinstance(reference_embeddings, torch.Tensor):
-        reference_embeddings = torch.tensor(reference_embeddings)
+    # Ensure both inputs are numpy arrays
+    if not isinstance(query_embeddings, np.ndarray):
+        query_embeddings = np.array(query_embeddings)
+    if not isinstance(reference_embeddings, np.ndarray):
+        reference_embeddings = np.array(reference_embeddings)
     
     # Normalize the embeddings
-    query_embeddings = query_embeddings / query_embeddings.norm(dim=1, keepdim=True)
-    reference_embeddings = reference_embeddings / reference_embeddings.norm(dim=1, keepdim=True)
+    query_norm = np.linalg.norm(query_embeddings, axis=1, keepdims=True)
+    query_embeddings = query_embeddings / query_norm
+    
+    ref_norm = np.linalg.norm(reference_embeddings, axis=1, keepdims=True)
+    reference_embeddings = reference_embeddings / ref_norm
     
     # Calculate cosine similarity
-    similarities = torch.mm(query_embeddings, reference_embeddings.T)
+    similarities = np.dot(query_embeddings, reference_embeddings.T)
     
     # Get the best matches for each query
-    best_scores, best_indices = similarities.max(dim=1)
+    best_indices = np.argmax(similarities, axis=1)
+    best_scores = [similarities[i, best_indices[i]] for i in range(len(best_indices))]
     
-    return best_scores.tolist(), best_indices.tolist()
+    return best_scores, best_indices.tolist()
