@@ -294,7 +294,7 @@ def get_claude_mitre_mapping(description, mitre_techniques, client):
     try:
         # Call Claude Sonnet API
         message = client.messages.create(
-            model="claude-3-sonnet-20240229",  # Using Sonnet instead of Haiku
+            model="claude-3-5-sonnet-20240620",  # Using Sonnet instead of Haiku
             max_tokens=1000,
             system=system_prompt,
             messages=[
