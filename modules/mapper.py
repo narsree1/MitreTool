@@ -29,6 +29,25 @@ def batch_check_library_matches(descriptions: List[str],
     if library_df is None or library_df.empty or library_embeddings is None:
         return [(None, 0.0, "No library data available") for _ in descriptions]
     
+    # Check if Claude API is configured properly
+    if _model is None or not _model.get("api_key"):
+        st.warning("Claude API not configured. Using simplified library matching.")
+        # Fall back to simple text matching without embeddings
+        results = []
+        for desc in descriptions:
+            # Try exact matches by lowercase comparison
+            if pd.isna(desc) or desc is None or isinstance(desc, float):
+                results.append((None, 0.0, "Invalid description (None or numeric value)"))
+                continue
+                
+            lower_desc = str(desc).lower()
+            matches = library_df[library_df['Description'].str.lower() == lower_desc]
+            if not matches.empty:
+                results.append((matches.iloc[0], 1.0, "Exact match found in library"))
+            else:
+                results.append((None, 0.0, "No match found in library"))
+        return results
+    
     results = []
     
     # First try exact matches (fast text comparison)
@@ -284,7 +303,10 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 match_sources[i] = "Invalid description"
     
     # Label for Claude mapping
-    mapping_label = "Claude API mapping"
+    if _model is not None and _model.get("api_key"):
+        mapping_label = "Claude API mapping"
+    else:
+        mapping_label = "Basic mapping (Claude API not configured)"
     
     # Batch map remaining cases using Claude API
     if model_map_descriptions:
