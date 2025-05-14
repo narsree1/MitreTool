@@ -8,7 +8,7 @@ from streamlit_lottie import st_lottie
 
 # Import modules
 from modules.data_loader import load_mitre_data, load_library_data_with_embeddings, create_local_mitre_data_cache
-from modules.embedding import load_model, get_mitre_embeddings
+from modules.embedding import load_sentence_transformer_model, load_claude_config, CLAUDE_MODELS
 from modules.mapper import process_mappings, get_suggested_use_cases
 from modules.utils import load_lottie_url
 from modules.visualizations import create_navigator_layer
@@ -44,6 +44,10 @@ if 'mitre_embeddings' not in st.session_state:
     st.session_state.mitre_embeddings = None
 if '_uploaded_file' not in st.session_state:
     st.session_state._uploaded_file = None
+if 'use_claude_for_mapping' not in st.session_state:
+    st.session_state.use_claude_for_mapping = True
+if 'claude_model_type' not in st.session_state:
+    st.session_state.claude_model_type = "haiku"  # Default to cheaper Haiku model
 
 # Check if Claude API key is configured
 def is_claude_api_configured():
@@ -54,6 +58,27 @@ def is_claude_api_configured():
         bool: True if configured, False otherwise
     """
     return bool(st.secrets.get("claude", {}).get("api_key", ""))
+
+# Update Claude model type in secrets if it changed
+def update_claude_model_type(model_type):
+    """
+    Update Claude model type in session state and secrets if possible
+    
+    Args:
+        model_type: The model type to use (haiku, sonnet, opus)
+    """
+    if model_type != st.session_state.claude_model_type:
+        st.session_state.claude_model_type = model_type
+        
+        # Try to update secrets if we have direct access (for local development)
+        try:
+            if hasattr(st.secrets, "_secrets"):
+                if "claude" not in st.secrets._secrets:
+                    st.secrets._secrets["claude"] = {}
+                st.secrets._secrets["claude"]["model"] = model_type
+        except:
+            # For Streamlit Cloud, secrets can only be updated through the web interface
+            pass
 
 # Render suggestions page
 def render_suggestions_page():
@@ -172,7 +197,7 @@ with st.sidebar:
     This tool maps your security use cases to the MITRE ATT&CK framework using:
     
     1. Library matching for known use cases
-    2. Claude API for natural language mapping
+    2. AI-powered natural language mapping
     3. Suggestions for additional use cases based on your log sources
     
     - Upload a CSV with security use cases
@@ -184,10 +209,57 @@ with st.sidebar:
     
     # Display Claude API configuration status
     st.markdown("---")
-    st.markdown("### Claude API Status")
+    st.markdown("### AI Configuration")
     
     if is_claude_api_configured():
-        st.success("Claude API key configured via Streamlit secrets.")
+        st.success("Claude API key configured ✅")
+        
+        # Add model selection
+        st.markdown("#### Claude Model Selection")
+        model_options = {
+            "haiku": "Claude Haiku (Fastest, Low Cost)",
+            "sonnet": "Claude Sonnet (Balanced)",
+            "opus": "Claude Opus (Highest Quality, Higher Cost)"
+        }
+        selected_model = st.radio(
+            "Select Claude model for mapping:",
+            options=list(model_options.keys()),
+            format_func=lambda x: model_options[x],
+            index=list(model_options.keys()).index(st.session_state.claude_model_type)
+        )
+        
+        # Update model type if changed
+        if selected_model != st.session_state.claude_model_type:
+            update_claude_model_type(selected_model)
+            st.success(f"Changed to Claude {selected_model.title()}!")
+            # Force reload by rerunning after a short delay
+            time.sleep(0.5)
+            st.experimental_rerun()
+        
+        # Add toggle for using Claude API for mapping
+        st.markdown("#### AI Usage Settings")
+        use_claude = st.checkbox(
+            "Use Claude API for mapping (higher accuracy, uses API credits)",
+            value=st.session_state.use_claude_for_mapping
+        )
+        if use_claude != st.session_state.use_claude_for_mapping:
+            st.session_state.use_claude_for_mapping = use_claude
+            if use_claude:
+                st.success("Claude API will be used for mapping.")
+            else:
+                st.info("Sentence Transformer will be used for mapping to save API credits.")
+        
+        # Add estimated credit usage info
+        st.markdown("#### Estimated API Usage")
+        st.markdown(f"""
+        **Selected Model**: Claude {selected_model.title()}
+        
+        **API Usage**:
+        - {'HIGH ⚠️' if use_claude else 'LOW ✓'} ({"Uses" if use_claude else "Saves"} Claude API credits)
+        - {'~~' if not use_claude else ''}Uses Claude API for mapping{'~~' if not use_claude else ''}
+        - {'✓' if not use_claude else ''}Uses SentenceTransformer for suggestions{'✓' if not use_claude else ''}
+        """)
+        
     else:
         st.error("""
         Claude API key is not configured. 
@@ -200,33 +272,47 @@ with st.sidebar:
         ```
         [claude]
         api_key = "your-claude-api-key"
+        model = "haiku"  # Options: haiku, sonnet, opus
         ```
         """)
     
     st.markdown("---")
-    st.markdown("© 2025 | v1.5.0 (Claude Enhanced)")
+    st.markdown("© 2025 | v1.6.0 (API Optimized)")
 
 # Check if Claude API key is configured
 if not is_claude_api_configured():
     if st.session_state.page != "home":
         st.warning("⚠️ Claude API key is not configured. Please configure it in Streamlit Cloud secrets.")
 
-# Load the ML model and MITRE data
-model = load_model()
+# Load the models
+st_model = load_sentence_transformer_model()
+claude_config = load_claude_config()
+
+# Get information about what model is being used for mapping
+if claude_config and st.session_state.use_claude_for_mapping:
+    current_model = f"Claude {claude_config.get('model_type', 'API').title()}"
+    model_type = "claude"
+else:
+    current_model = "Sentence Transformer"
+    model_type = "transformer"
+
+# Load MITRE data
 mitre_techniques, tactic_mapping, tactics_list = load_mitre_data()
 
-# Load MITRE embeddings
-mitre_embeddings = get_mitre_embeddings(model, mitre_techniques)
+# Load MITRE embeddings (use SentenceTransformer for this to save API credits)
+from modules.embedding import get_mitre_embeddings
+mitre_embeddings = get_mitre_embeddings(st_model, claude_config, mitre_techniques, use_claude_api=False)
 st.session_state.mitre_embeddings = mitre_embeddings
 
-# Load library data with optimized embedding search
-library_df, library_embeddings = load_library_data_with_embeddings(model)
+# Load library data with optimized embedding search (use SentenceTransformer to save API credits)
+library_df, library_embeddings = load_library_data_with_embeddings(st_model, claude_config, use_claude_for_library=False)
 if library_df is not None:
     st.session_state.library_data = library_df
     st.session_state.library_embeddings = library_embeddings
 
-# Store model in session state for use in suggestions
-st.session_state.model = model
+# Store models in session state for use
+st.session_state.st_model = st_model
+st.session_state.claude_config = claude_config
 
 # Home page
 if st.session_state.page == "home":
@@ -246,9 +332,19 @@ if st.session_state.page == "home":
         ```
         [claude]
         api_key = "your-claude-api-key"
+        model = "haiku"  # Options: haiku, sonnet, opus
         ```
         
         If you don't have a Claude API key, you can sign up at [Anthropic](https://console.anthropic.com/) to get one.
+        """)
+    else:
+        # Show current configuration
+        st.info(f"""
+        **Current Mapping Model**: {current_model}
+        
+        {'✅ Using Sentence Transformer for Suggestions (saves API credits)' if model_type == 'transformer' or not st.session_state.use_claude_for_mapping else '⚠️ Using Claude API (consumes API credits)'}
+        
+        *You can change these settings in the sidebar.*
         """)
     
     col1, col2 = st.columns([3, 2])
@@ -289,7 +385,7 @@ if st.session_state.page == "home":
                     1. **Upload** your security use cases CSV file
                     2. The tool first **checks** if the use case exists in the library
                     3. If found in library, it uses the **pre-mapped** MITRE data
-                    4. If not found, it **analyzes** the use case using Claude API and maps it
+                    4. If not found, it **analyzes** the use case using AI and maps it
                     5. **View** mapped results, analytics, and export options
                     6. **Discover** additional relevant use cases based on your log sources
                     """)
@@ -303,43 +399,47 @@ if st.session_state.page == "home":
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
                     
                     # Check if Claude API is configured
-                    if not is_claude_api_configured():
-                        st.warning("⚠️ Claude API key is not configured. Mapping will use fallback methods with lower accuracy.")
+                    if not is_claude_api_configured() and st.session_state.use_claude_for_mapping:
+                        st.warning("⚠️ Claude API key is not configured. Mapping will use Sentence Transformer with lower accuracy.")
                     
-                    if st.button("Start Mapping", key="start_mapping"):
-                        with st.spinner("Mapping security use cases to MITRE ATT&CK..."):
-                            # Progress bar
-                            progress_bar = st.progress(0)
-                            start_time = time.time()
-                            
-                            # Use the optimized batch processing function
-                            df, techniques_count = process_mappings(
-                                df, 
-                                model, 
-                                mitre_techniques, 
-                                st.session_state.mitre_embeddings,
-                                st.session_state.library_data,
-                                st.session_state.library_embeddings
-                            )
-                            
-                            # Store processed data in session state
-                            st.session_state.processed_data = df
-                            st.session_state.techniques_count = techniques_count
-                            st.session_state.mapping_complete = True
-                            
-                            # Complete
-                            elapsed_time = time.time() - start_time
-                            progress_bar.progress(100)
-                            
-                            st.success(f"Mapping complete in {elapsed_time:.2f} seconds! Navigate to Results to view the data.")
-                            
-                            # Add a suggestion to check the new Suggestions page
-                            st.info("Don't forget to check the Suggestions page for additional use cases based on your log sources!")
-                            
-                            # Add a button to go directly to suggestions
-                            if st.button("View Suggested Use Cases"):
-                                st.session_state.page = "suggestions"
-                                st.experimental_rerun()
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Start Mapping", key="start_mapping"):
+                            with st.spinner(f"Mapping security use cases to MITRE ATT&CK using {current_model}..."):
+                                # Progress bar
+                                progress_bar = st.progress(0)
+                                start_time = time.time()
+                                
+                                # Use the optimized batch processing function
+                                df, techniques_count = process_mappings(
+                                    df, 
+                                    st_model, 
+                                    claude_config, 
+                                    mitre_techniques, 
+                                    st.session_state.mitre_embeddings,
+                                    st.session_state.library_data,
+                                    st.session_state.library_embeddings,
+                                    use_claude_for_mapping=st.session_state.use_claude_for_mapping
+                                )
+                                
+                                # Store processed data in session state
+                                st.session_state.processed_data = df
+                                st.session_state.techniques_count = techniques_count
+                                st.session_state.mapping_complete = True
+                                
+                                # Complete
+                                elapsed_time = time.time() - start_time
+                                progress_bar.progress(100)
+                                
+                                st.success(f"Mapping complete in {elapsed_time:.2f} seconds! Navigate to Results to view the data.")
+                                
+                                # Add a suggestion to check the new Suggestions page
+                                st.info("Don't forget to check the Suggestions page for additional use cases based on your log sources!")
+                    
+                    with col2:
+                        if st.button("View Suggested Use Cases", disabled=not st.session_state.mapping_complete):
+                            st.session_state.page = "suggestions"
+                            st.experimental_rerun()
             except Exception as e:
                 st.error(f"Error processing file: {str(e)}")
         
@@ -359,21 +459,22 @@ if st.session_state.page == "home":
             1. **Upload** your security use cases CSV file
             2. The tool first **checks** if the use case exists in the library
             3. If found in library, it uses the **pre-mapped** MITRE data
-            4. If not found, it uses **Claude API** to analyze the use case and map it
+            4. If not found, it uses **AI** to analyze the use case and map it
             5. **View** mapped results, analytics, and export options
             6. **Discover** additional relevant use cases based on your log sources
             """)
             
-        with st.expander("💡 Enhanced with Claude API", expanded=True):
+        with st.expander("🔋 API Usage Optimization", expanded=True):
             st.markdown("""
-            This tool uses Claude API for:
+            This tool is optimized to minimize Claude API usage:
             
-            - More accurate natural language understanding
-            - Better semantic mapping to MITRE techniques
-            - Improved context awareness for complex security use cases
-            - Higher quality mappings compared to traditional embeddings
+            - **Library Matching**: Uses Sentence Transformer (free) instead of Claude API
+            - **Suggestions**: Uses Sentence Transformer to save API credits
+            - **MITRE Embeddings**: Pre-computed once using Sentence Transformer
+            - **Mapping**: Can use either Claude API (higher accuracy) or Sentence Transformer (no API cost)
+            - **Model Selection**: Choose from Haiku (lowest cost), Sonnet, or Opus based on your needs
             
-            Claude API requires an API key which should be configured in Streamlit Cloud secrets.
+            You can configure these settings in the sidebar to balance accuracy vs. API usage.
             """)
             
         with st.expander("🔐 API Key Configuration", expanded=True):
@@ -387,6 +488,7 @@ if st.session_state.page == "home":
             ```
             [claude]
             api_key = "your-claude-api-key"
+            model = "haiku"  # Options: haiku, sonnet, opus
             ```
             
             Your API key will be securely stored and never exposed to users of the app.
@@ -486,10 +588,10 @@ elif st.session_state.page == "analytics":
         
         # Count library matches vs model matches - handle NaN values safely
         library_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('library', case=False, na=False)].shape[0]
-        claude_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('Claude', case=False, na=False)].shape[0]
+        ai_matches = df.shape[0] - library_matches - df[df['Match Source'].fillna('Unknown').astype(str).str.contains('Invalid', case=False, na=False)].shape[0]
         
         # Display metrics
-        create_metrics_display(len(df), covered_techniques, coverage_percent, library_matches, claude_matches)
+        create_metrics_display(len(df), covered_techniques, coverage_percent, library_matches, ai_matches)
         
         # Match source chart
         st.markdown("### Mapping Source Distribution")
