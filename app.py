@@ -3,6 +3,7 @@ import streamlit as st
 import datetime
 import time
 import json
+import os
 from streamlit_option_menu import option_menu
 from streamlit_lottie import st_lottie
 
@@ -44,8 +45,6 @@ if 'mitre_embeddings' not in st.session_state:
     st.session_state.mitre_embeddings = None
 if '_uploaded_file' not in st.session_state:
     st.session_state._uploaded_file = None
-if 'model_name' not in st.session_state:
-    st.session_state.model_name = "BAAI/bge-large-en-v1.5"
 
 # Render suggestions page
 def render_suggestions_page():
@@ -164,7 +163,7 @@ with st.sidebar:
     This tool maps your security use cases to the MITRE ATT&CK framework using:
     
     1. Library matching for known use cases
-    2. Natural language processing for new use cases
+    2. Claude API for natural language mapping
     3. Suggestions for additional use cases based on your log sources
     
     - Upload a CSV with security use cases
@@ -174,8 +173,40 @@ with st.sidebar:
     - Export for MITRE Navigator
     """)
     
+    # Add a section for Claude API key entry
     st.markdown("---")
-    st.markdown(f"© 2025 | v1.5.0 (BGE-Enhanced)")
+    st.markdown("### Claude API Configuration")
+    
+    # Check if API key is already in environment
+    api_key = os.environ.get("CLAUDE_API_KEY", "")
+    
+    if not api_key:
+        st.warning("Claude API key not set. Enter it below:")
+        
+        api_key = st.text_input("Enter Claude API Key:", type="password")
+        
+        if api_key:
+            # Store in session state (temporary for this session)
+            if st.button("Save API Key"):
+                os.environ["CLAUDE_API_KEY"] = api_key
+                st.success("API key saved for this session.")
+                time.sleep(1)
+                st.experimental_rerun()
+    else:
+        st.success("Claude API key configured.")
+        
+        # Option to clear API key
+        if st.button("Clear API Key"):
+            os.environ["CLAUDE_API_KEY"] = ""
+            st.experimental_rerun()
+    
+    st.markdown("---")
+    st.markdown("© 2025 | v1.5.0 (Claude Enhanced)")
+
+# Check if Claude API key is configured
+if not os.environ.get("CLAUDE_API_KEY", ""):
+    if st.session_state.page != "home":
+        st.warning("⚠️ Claude API key is not configured. Please go to Home page and set up your API key.")
 
 # Load the ML model and MITRE data
 model = load_model()
@@ -199,6 +230,19 @@ if st.session_state.page == "home":
     st.markdown("# 🛡️ MITRE ATT&CK Mapping Tool")
     st.markdown("### Map your security use cases to the MITRE ATT&CK framework")
     
+    # Check if Claude API key is configured
+    if not os.environ.get("CLAUDE_API_KEY", ""):
+        st.warning("""
+        ⚠️ Claude API key is not configured. This tool uses Claude API for better mapping accuracy.
+        
+        Please enter your Claude API key in the sidebar.
+        
+        If you don't have a Claude API key, you can:
+        1. Sign up at [Anthropic](https://console.anthropic.com/)
+        2. Create an API key
+        3. Enter it in the sidebar
+        """)
+    
     col1, col2 = st.columns([3, 2])
     
     with col1:
@@ -210,9 +254,6 @@ if st.session_state.page == "home":
             st_lottie(lottie_upload, height=200, key="upload_animation")
         
         st.markdown("Upload a CSV file containing your security use cases. The file should include the columns: 'Use Case Name', 'Description', and 'Log Source'.")
-        
-        # Display model information
-        st.info(f"Using BAAI/bge-large-en-v1.5 embedding model - one of the top-performing models on the MTEB benchmark for enhanced accuracy")
         
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv", key="file_upload")
         
@@ -240,7 +281,7 @@ if st.session_state.page == "home":
                     1. **Upload** your security use cases CSV file
                     2. The tool first **checks** if the use case exists in the library
                     3. If found in library, it uses the **pre-mapped** MITRE data
-                    4. If not found, it **analyzes** the use case using BGE-large-en-v1.5 embeddings
+                    4. If not found, it **analyzes** the use case using Claude API and maps it
                     5. **View** mapped results, analytics, and export options
                     6. **Discover** additional relevant use cases based on your log sources
                     """)
@@ -253,8 +294,12 @@ if st.session_state.page == "home":
                     if st.session_state.library_data is not None:
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
                     
+                    # Check if Claude API is configured
+                    if not os.environ.get("CLAUDE_API_KEY", ""):
+                        st.warning("⚠️ Claude API key is not configured. Mapping will use fallback methods with lower accuracy.")
+                    
                     if st.button("Start Mapping", key="start_mapping"):
-                        with st.spinner("Mapping security use cases to MITRE ATT&CK using BGE-large-en-v1.5 embeddings..."):
+                        with st.spinner("Mapping security use cases to MITRE ATT&CK..."):
                             # Progress bar
                             progress_bar = st.progress(0)
                             start_time = time.time()
@@ -306,19 +351,21 @@ if st.session_state.page == "home":
             1. **Upload** your security use cases CSV file
             2. The tool first **checks** if the use case exists in the library
             3. If found in library, it uses the **pre-mapped** MITRE data
-            4. If not found, it **analyzes** the use case using advanced embeddings
+            4. If not found, it uses **Claude API** to analyze the use case and map it
             5. **View** mapped results, analytics, and export options
             6. **Discover** additional relevant use cases based on your log sources
             """)
-        
-        with st.expander("🚀 BGE-large-en-v1.5 Advantages", expanded=True):
-            st.markdown("""
-            This version uses the BGE-large-en-v1.5 embedding model for improved mapping accuracy:
             
-            - **State-of-the-art performance** on the MTEB benchmark
-            - **Better semantic understanding** of security descriptions and techniques
-            - **Enhanced context awareness** for more accurate MITRE ATT&CK mapping
-            - **Improved similarity detection** for both library matching and model-based mapping
+        with st.expander("💡 Enhanced with Claude API", expanded=True):
+            st.markdown("""
+            This tool now uses Claude API for:
+            
+            - More accurate natural language understanding
+            - Better semantic mapping to MITRE techniques
+            - Improved context awareness for complex security use cases
+            - Higher quality mappings compared to traditional embeddings
+            
+            Claude API requires an API key which can be entered in the sidebar.
             """)
 
 # Results page
@@ -415,10 +462,10 @@ elif st.session_state.page == "analytics":
         
         # Count library matches vs model matches - handle NaN values safely
         library_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('library', case=False, na=False)].shape[0]
-        model_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('embedding', case=False, na=False)].shape[0]
+        claude_matches = df[df['Match Source'].fillna('Unknown').astype(str).str.contains('Claude', case=False, na=False)].shape[0]
         
         # Display metrics
-        create_metrics_display(len(df), covered_techniques, coverage_percent, library_matches, model_matches)
+        create_metrics_display(len(df), covered_techniques, coverage_percent, library_matches, claude_matches)
         
         # Match source chart
         st.markdown("### Mapping Source Distribution")
@@ -456,7 +503,7 @@ elif st.session_state.page == "analytics":
 elif st.session_state.page == "suggestions":
     render_suggestions_page()
 
-# Export page
+# Export page - Removed "Export New Cases for Library" section
 elif st.session_state.page == "export":
     st.markdown("# 💾 Export Navigator Layer")
     
