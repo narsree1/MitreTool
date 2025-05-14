@@ -3,7 +3,6 @@ import streamlit as st
 import datetime
 import time
 import json
-import os
 from streamlit_option_menu import option_menu
 from streamlit_lottie import st_lottie
 
@@ -45,6 +44,16 @@ if 'mitre_embeddings' not in st.session_state:
     st.session_state.mitre_embeddings = None
 if '_uploaded_file' not in st.session_state:
     st.session_state._uploaded_file = None
+
+# Check if Claude API key is configured
+def is_claude_api_configured():
+    """
+    Check if Claude API key is configured in Streamlit secrets
+    
+    Returns:
+        bool: True if configured, False otherwise
+    """
+    return bool(st.secrets.get("claude", {}).get("api_key", ""))
 
 # Render suggestions page
 def render_suggestions_page():
@@ -173,40 +182,34 @@ with st.sidebar:
     - Export for MITRE Navigator
     """)
     
-    # Add a section for Claude API key entry
+    # Display Claude API configuration status
     st.markdown("---")
-    st.markdown("### Claude API Configuration")
+    st.markdown("### Claude API Status")
     
-    # Check if API key is already in environment
-    api_key = os.environ.get("CLAUDE_API_KEY", "")
-    
-    if not api_key:
-        st.warning("Claude API key not set. Enter it below:")
-        
-        api_key = st.text_input("Enter Claude API Key:", type="password")
-        
-        if api_key:
-            # Store in session state (temporary for this session)
-            if st.button("Save API Key"):
-                os.environ["CLAUDE_API_KEY"] = api_key
-                st.success("API key saved for this session.")
-                time.sleep(1)
-                st.experimental_rerun()
+    if is_claude_api_configured():
+        st.success("Claude API key configured via Streamlit secrets.")
     else:
-        st.success("Claude API key configured.")
+        st.error("""
+        Claude API key is not configured. 
         
-        # Option to clear API key
-        if st.button("Clear API Key"):
-            os.environ["CLAUDE_API_KEY"] = ""
-            st.experimental_rerun()
+        To configure it in Streamlit Cloud:
+        1. Go to your Streamlit Cloud dashboard
+        2. Select this app
+        3. Go to Settings > Secrets
+        4. Add the following:
+        ```
+        [claude]
+        api_key = "your-claude-api-key"
+        ```
+        """)
     
     st.markdown("---")
     st.markdown("© 2025 | v1.5.0 (Claude Enhanced)")
 
 # Check if Claude API key is configured
-if not os.environ.get("CLAUDE_API_KEY", ""):
+if not is_claude_api_configured():
     if st.session_state.page != "home":
-        st.warning("⚠️ Claude API key is not configured. Please go to Home page and set up your API key.")
+        st.warning("⚠️ Claude API key is not configured. Please configure it in Streamlit Cloud secrets.")
 
 # Load the ML model and MITRE data
 model = load_model()
@@ -231,16 +234,21 @@ if st.session_state.page == "home":
     st.markdown("### Map your security use cases to the MITRE ATT&CK framework")
     
     # Check if Claude API key is configured
-    if not os.environ.get("CLAUDE_API_KEY", ""):
+    if not is_claude_api_configured():
         st.warning("""
         ⚠️ Claude API key is not configured. This tool uses Claude API for better mapping accuracy.
         
-        Please enter your Claude API key in the sidebar.
+        To configure it in Streamlit Cloud:
+        1. Go to your Streamlit Cloud dashboard
+        2. Select this app
+        3. Go to Settings > Secrets
+        4. Add the following:
+        ```
+        [claude]
+        api_key = "your-claude-api-key"
+        ```
         
-        If you don't have a Claude API key, you can:
-        1. Sign up at [Anthropic](https://console.anthropic.com/)
-        2. Create an API key
-        3. Enter it in the sidebar
+        If you don't have a Claude API key, you can sign up at [Anthropic](https://console.anthropic.com/) to get one.
         """)
     
     col1, col2 = st.columns([3, 2])
@@ -295,7 +303,7 @@ if st.session_state.page == "home":
                         st.info(f"Library has {len(st.session_state.library_data)} pre-mapped security use cases that will be matched first.")
                     
                     # Check if Claude API is configured
-                    if not os.environ.get("CLAUDE_API_KEY", ""):
+                    if not is_claude_api_configured():
                         st.warning("⚠️ Claude API key is not configured. Mapping will use fallback methods with lower accuracy.")
                     
                     if st.button("Start Mapping", key="start_mapping"):
@@ -358,14 +366,30 @@ if st.session_state.page == "home":
             
         with st.expander("💡 Enhanced with Claude API", expanded=True):
             st.markdown("""
-            This tool now uses Claude API for:
+            This tool uses Claude API for:
             
             - More accurate natural language understanding
             - Better semantic mapping to MITRE techniques
             - Improved context awareness for complex security use cases
             - Higher quality mappings compared to traditional embeddings
             
-            Claude API requires an API key which can be entered in the sidebar.
+            Claude API requires an API key which should be configured in Streamlit Cloud secrets.
+            """)
+            
+        with st.expander("🔐 API Key Configuration", expanded=True):
+            st.markdown("""
+            To configure your Claude API key in Streamlit Cloud:
+            
+            1. Go to your Streamlit Cloud dashboard
+            2. Select this app
+            3. Go to Settings > Secrets
+            4. Add the following:
+            ```
+            [claude]
+            api_key = "your-claude-api-key"
+            ```
+            
+            Your API key will be securely stored and never exposed to users of the app.
             """)
 
 # Results page
@@ -503,7 +527,7 @@ elif st.session_state.page == "analytics":
 elif st.session_state.page == "suggestions":
     render_suggestions_page()
 
-# Export page - Removed "Export New Cases for Library" section
+# Export page
 elif st.session_state.page == "export":
     st.markdown("# 💾 Export Navigator Layer")
     
