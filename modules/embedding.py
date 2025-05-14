@@ -4,11 +4,10 @@ import requests
 import json
 import numpy as np
 from typing import List, Dict, Any, Optional, Union
-import os
 
-# Claude API configuration
-CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
+# Claude API configuration constants
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_MODEL = "claude-3-opus-20240229"
 
 @st.cache_resource
 def load_model():
@@ -19,15 +18,18 @@ def load_model():
         model: A dictionary with Claude API configuration
     """
     try:
-        # Check if Claude API key is set
-        if not CLAUDE_API_KEY:
-            st.warning("CLAUDE_API_KEY not found in environment variables. Please set it to use Claude embeddings.")
+        # Check if Claude API key is set in Streamlit secrets
+        api_key = st.secrets.get("claude", {}).get("api_key", "")
+        
+        if not api_key:
+            st.warning("Claude API key not found in secrets. Please configure it in Streamlit Cloud.")
             return None
             
         # Return a config object instead of an actual model
         model = {
-            "api_key": CLAUDE_API_KEY,
-            "api_url": CLAUDE_API_URL
+            "api_key": api_key,
+            "api_url": CLAUDE_API_URL,
+            "model": CLAUDE_MODEL
         }
         return model
     except Exception as e:
@@ -58,7 +60,7 @@ def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optio
         
         # Format the request with the text to embed
         payload = {
-            "model": "claude-3-opus-20240229",  # Using Claude 3 Opus for best embeddings
+            "model": model_config.get("model", CLAUDE_MODEL),
             "messages": [
                 {"role": "user", "content": f"Create an embedding for the following text: {text}"}
             ],
@@ -89,6 +91,20 @@ def _get_embedding_from_claude(text: str, model_config: Dict[str, Any]) -> Optio
         st.error(f"Error getting embedding from Claude: {e}")
         return None
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour to reduce API calls
+def get_embedding_with_cache(text: str, model_config: Dict[str, Any]) -> Optional[np.ndarray]:
+    """
+    Get embedding for a text using Claude API with caching
+    
+    Args:
+        text: Text to embed
+        model_config: Dictionary with Claude API configuration
+        
+    Returns:
+        embedding: Numpy array of embedding vector or None if failed
+    """
+    return _get_embedding_from_claude(text, model_config)
+
 def batch_get_embeddings(texts: List[str], model_config: Dict[str, Any]) -> Optional[torch.Tensor]:
     """
     Get embeddings for multiple texts using Claude API
@@ -113,7 +129,8 @@ def batch_get_embeddings(texts: List[str], model_config: Dict[str, Any]) -> Opti
             batch_embeddings = []
             
             for text in batch:
-                embedding = _get_embedding_from_claude(text, model_config)
+                # Use cached version to reduce API calls
+                embedding = get_embedding_with_cache(text, model_config)
                 if embedding is not None:
                     batch_embeddings.append(embedding)
                 else:
