@@ -1,10 +1,10 @@
-# embedding.py - NO TORCH DEPENDENCIES
+# embedding.py - ULTRA SIMPLE VERSION - NO ML DEPENDENCIES
 import streamlit as st
 import requests
 import json
 import numpy as np
-from typing import List, Dict, Any, Optional, Union
-import tensorflow as tf
+import hashlib
+from typing import List, Dict, Any, Optional
 
 # Claude API configuration constants
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
@@ -19,51 +19,48 @@ CLAUDE_MODELS = {
 @st.cache_resource
 def load_sentence_transformer_model():
     """
-    Load a simple embedding model (no PyTorch dependency)
+    Load a simple embedding model (no ML dependencies)
     
     Returns:
-        model: A simple embedding model using TensorFlow
+        model: A simple embedding generator
     """
-    try:
-        # Create a basic TF-based encoder
-        class SimpleEncoder:
-            def __init__(self):
-                # Initialize with a simple word embedding approach
-                self.vectorizer = tf.keras.layers.TextVectorization(
-                    max_tokens=10000,
-                    output_mode='int',
-                    output_sequence_length=100
-                )
-                # Simple embedding layer
-                self.embedding = tf.keras.layers.Embedding(
-                    input_dim=10000,
-                    output_dim=512,
-                    mask_zero=True
-                )
-                # Adapt the vectorizer with some sample text
-                self.vectorizer.adapt(['sample text for adaptation'])
-            
-            def encode(self, texts, convert_to_tensor=False, convert_to_numpy=False):
-                if not isinstance(texts, list):
-                    texts = [texts]
-                
-                # Use simple embedding + mean pooling
-                vectors = self.vectorizer(texts)
-                embeddings = self.embedding(vectors).numpy()
-                # Mean pooling
-                embeddings = np.mean(embeddings, axis=1)
-                
-                if convert_to_tensor:
-                    return tf.convert_to_tensor(embeddings)
-                elif convert_to_numpy:
-                    return embeddings
-                else:
-                    return embeddings
+    class SimpleHashEncoder:
+        """A very simple encoder that creates deterministic embeddings using hashing"""
         
-        return SimpleEncoder()
-    except Exception as e:
-        st.error(f"Error loading embedding model: {e}")
-        return None
+        def __init__(self):
+            self.dim = 512  # Embedding dimension
+        
+        def encode(self, texts, convert_to_numpy=False):
+            """Create simple hash-based embeddings"""
+            if not isinstance(texts, list):
+                texts = [texts]
+                
+            embeddings = []
+            for text in texts:
+                # Create a deterministic embedding based on text hash
+                embedding = self._text_to_embedding(text)
+                embeddings.append(embedding)
+            
+            return np.array(embeddings)
+        
+        def _text_to_embedding(self, text):
+            """Convert text to a deterministic embedding using hash function"""
+            # Use a hash function to create a deterministic seed
+            text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+            seed = int(text_hash, 16) % (2**32)
+            
+            # Use the seed to generate a deterministic random vector
+            np.random.seed(seed)
+            embedding = np.random.randn(self.dim)
+            
+            # Normalize the embedding to unit length
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+                
+            return embedding
+    
+    return SimpleHashEncoder()
 
 @st.cache_resource
 def load_claude_config():
@@ -142,8 +139,9 @@ def get_embedding_with_claude(text: str, model_config: Dict[str, Any]) -> Option
             response_data = response.json()
             # In real implementation, extract actual embedding from Claude's response
             # For now, we'll create a deterministic pseudo-embedding based on text hash
-            hash_val = hash(text) % 10000
-            np.random.seed(hash_val)
+            text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+            seed = int(text_hash, 16) % (2**32)
+            np.random.seed(seed)
             embedding = np.random.randn(512)  # Using 512-dim embedding
             embedding = embedding / np.linalg.norm(embedding)  # Normalize
             return embedding
@@ -156,11 +154,11 @@ def get_embedding_with_claude(text: str, model_config: Dict[str, Any]) -> Option
 
 def get_embedding_with_transformer(text: str, model) -> Optional[np.ndarray]:
     """
-    Get embedding for a text using transformer model
+    Get embedding for a text using simple encoder
     
     Args:
         text: Text to embed
-        model: Encoder model
+        model: SimpleHashEncoder
         
     Returns:
         embedding: Numpy array of embedding vector or None if failed
@@ -172,16 +170,16 @@ def get_embedding_with_transformer(text: str, model) -> Optional[np.ndarray]:
         embedding = model.encode(text, convert_to_numpy=True)
         return embedding
     except Exception as e:
-        st.error(f"Error getting embedding from transformer: {e}")
+        st.error(f"Error getting embedding: {e}")
         return None
 
 def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[np.ndarray]:
     """
-    Get embeddings for multiple texts using transformer model
+    Get embeddings for multiple texts using simple encoder
     
     Args:
         texts: List of texts to embed
-        model: Encoder model
+        model: SimpleHashEncoder
         
     Returns:
         embeddings: Array of embedding vectors
@@ -190,20 +188,7 @@ def batch_get_embeddings_with_transformer(texts: List[str], model) -> Optional[n
         return None
         
     try:
-        # Use batching for encoding
-        batch_size = 32
-        all_embeddings = []
-        
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i+batch_size]
-            batch_embeddings = model.encode(batch)
-            all_embeddings.append(batch_embeddings)
-        
-        # Combine all embeddings
-        if all_embeddings:
-            embeddings = np.vstack(all_embeddings)
-            return embeddings
-        return None
+        return model.encode(texts)
     except Exception as e:
         st.error(f"Error computing batch embeddings: {e}")
         return None
@@ -215,7 +200,7 @@ def batch_get_embeddings_hybrid(texts: List[str], st_model, claude_config: Dict[
     
     Args:
         texts: List of texts to embed
-        st_model: Transformer model
+        st_model: SimpleHashEncoder
         claude_config: Dictionary with Claude API configuration
         use_claude_api: Whether to use Claude API (for critical mapping) or transformer
         
@@ -272,7 +257,7 @@ def get_mitre_embeddings(st_model, claude_config, techniques, use_claude_api=Fal
     Generate embeddings for MITRE technique descriptions
     
     Args:
-        st_model: Transformer model
+        st_model: SimpleHashEncoder
         claude_config: Claude API configuration
         techniques: List of MITRE technique dictionaries
         use_claude_api: Whether to use Claude API for embeddings
