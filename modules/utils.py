@@ -1,5 +1,5 @@
+# utils.py - NO TORCH DEPENDENCIES
 import requests
-import torch
 
 def load_lottie_url(url: str):
     """
