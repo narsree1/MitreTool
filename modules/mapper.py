@@ -1,14 +1,13 @@
 from typing import List, Dict, Tuple, Any, Optional
 import pandas as pd
-import torch
-import streamlit as st
 import numpy as np
+import streamlit as st
 
 from modules.embedding import batch_get_embeddings_hybrid, cosine_similarity_search, batch_similarity_search
 
 def batch_check_library_matches(descriptions: List[str], 
                               library_df: pd.DataFrame,
-                              library_embeddings: torch.Tensor,
+                              library_embeddings: np.ndarray,
                               st_model, 
                               claude_config: Dict[str, Any] = None,  # Now optional
                               batch_size: int = 32,
@@ -19,8 +18,8 @@ def batch_check_library_matches(descriptions: List[str],
     Args:
         descriptions: List of use case descriptions to match
         library_df: DataFrame containing library data
-        library_embeddings: Tensor of embeddings for library descriptions
-        st_model: SentenceTransformer model
+        library_embeddings: Array of embeddings for library descriptions
+        st_model: Embedding model
         claude_config: Claude API configuration dictionary (optional)
         batch_size: Number of descriptions to process at once
         similarity_threshold: Minimum similarity score to consider a match
@@ -94,17 +93,17 @@ def batch_check_library_matches(descriptions: List[str],
     if not valid_descriptions:
         return [exact_matches.get(i, (None, 0.0, "No match found in library")) for i in range(len(descriptions))]
     
-    # Use sentence transformer for library matching to save Claude API credits
+    # Use encoder for library matching to save Claude API credits
     # We don't need Claude's advanced understanding for library matches
     query_embeddings = batch_get_embeddings_hybrid(
         valid_descriptions, 
         st_model, 
         claude_config, 
-        use_claude_api=False  # Always use sentence transformer for library matching
+        use_claude_api=False  # Always use encoder for library matching
     )
     
     if query_embeddings is not None:
-        # Perform batch similarity search (entire batch at once for efficiency)
+        # Perform batch similarity search
         best_scores, best_indices = batch_similarity_search(query_embeddings, library_embeddings)
         
         # Process the results
@@ -143,7 +142,7 @@ def batch_map_to_mitre(descriptions: List[str],
                       st_model,
                       claude_config: Dict[str, Any],  # Claude config for mapping
                       mitre_techniques: List[Dict], 
-                      mitre_embeddings: torch.Tensor, 
+                      mitre_embeddings: np.ndarray, 
                       batch_size: int = 32,
                       use_claude_for_mapping: bool = True) -> List[Tuple]:
     """
@@ -151,10 +150,10 @@ def batch_map_to_mitre(descriptions: List[str],
     
     Args:
         descriptions: List of use case descriptions to map
-        st_model: SentenceTransformer model
+        st_model: Embedding model
         claude_config: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
-        mitre_embeddings: Tensor of embeddings for technique descriptions
+        mitre_embeddings: Array of embeddings for technique descriptions
         batch_size: Number of descriptions to process at once
         use_claude_for_mapping: Whether to use Claude API for MITRE mapping
         
@@ -217,12 +216,12 @@ def process_mappings(df, st_model, claude_config, mitre_techniques, mitre_embedd
     
     Args:
         df: DataFrame containing security use cases to map
-        st_model: SentenceTransformer model
+        st_model: Embedding model
         claude_config: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
-        mitre_embeddings: Tensor of embeddings for technique descriptions
+        mitre_embeddings: Array of embeddings for technique descriptions
         library_df: DataFrame containing library data
-        library_embeddings: Tensor of embeddings for library descriptions
+        library_embeddings: Array of embeddings for library descriptions
         use_claude_for_mapping: Whether to use Claude API for MITRE mapping
         
     Returns:
@@ -319,10 +318,10 @@ def process_mappings(df, st_model, claude_config, mitre_techniques, mitre_embedd
     
     # Label for mapping source
     if use_claude_for_mapping and claude_config is not None and claude_config.get("api_key"):
-        model_name = claude_config.get("model", "").split("-")[0].capitalize()
+        model_name = claude_config.get("model_type", "API").title()
         mapping_label = f"Claude {model_name} mapping"
     else:
-        mapping_label = "Sentence Transformer mapping"
+        mapping_label = "TensorFlow Embedding mapping"
     
     # Batch map remaining cases 
     if model_map_descriptions:
