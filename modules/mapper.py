@@ -4,22 +4,24 @@ import torch
 import streamlit as st
 import numpy as np
 
-from modules.embedding import cosine_similarity_search, batch_similarity_search, batch_get_embeddings
+from modules.embedding import batch_get_embeddings_hybrid, cosine_similarity_search, batch_similarity_search
 
 def batch_check_library_matches(descriptions: List[str], 
                               library_df: pd.DataFrame,
                               library_embeddings: torch.Tensor,
-                              _model: Dict[str, Any],  # Now expects Claude API config
+                              st_model, 
+                              claude_config: Dict[str, Any] = None,  # Now optional
                               batch_size: int = 32,
                               similarity_threshold: float = 0.8) -> List[Tuple]:
     """
-    Check for matches in the library in batches using Claude embeddings.
+    Check for matches in the library in batches.
     
     Args:
         descriptions: List of use case descriptions to match
         library_df: DataFrame containing library data
         library_embeddings: Tensor of embeddings for library descriptions
-        _model: Claude API configuration dictionary
+        st_model: SentenceTransformer model
+        claude_config: Claude API configuration dictionary (optional)
         batch_size: Number of descriptions to process at once
         similarity_threshold: Minimum similarity score to consider a match
         
@@ -29,9 +31,8 @@ def batch_check_library_matches(descriptions: List[str],
     if library_df is None or library_df.empty or library_embeddings is None:
         return [(None, 0.0, "No library data available") for _ in descriptions]
     
-    # Check if Claude API is configured properly
-    if _model is None or not _model.get("api_key"):
-        st.warning("Claude API not configured. Using simplified library matching.")
+    # Check if any embedding model is available
+    if st_model is None and (claude_config is None or not claude_config.get("api_key")):
         # Fall back to simple text matching without embeddings
         results = []
         for desc in descriptions:
@@ -93,8 +94,14 @@ def batch_check_library_matches(descriptions: List[str],
     if not valid_descriptions:
         return [exact_matches.get(i, (None, 0.0, "No match found in library")) for i in range(len(descriptions))]
     
-    # Get embeddings using Claude API
-    query_embeddings = batch_get_embeddings(valid_descriptions, _model)
+    # Use sentence transformer for library matching to save Claude API credits
+    # We don't need Claude's advanced understanding for library matches
+    query_embeddings = batch_get_embeddings_hybrid(
+        valid_descriptions, 
+        st_model, 
+        claude_config, 
+        use_claude_api=False  # Always use sentence transformer for library matching
+    )
     
     if query_embeddings is not None:
         # Perform batch similarity search (entire batch at once for efficiency)
@@ -133,38 +140,44 @@ def batch_check_library_matches(descriptions: List[str],
     return all_results
 
 def batch_map_to_mitre(descriptions: List[str], 
-                      _model: Dict[str, Any],  # Now expects Claude API config
+                      st_model,
+                      claude_config: Dict[str, Any],  # Claude config for mapping
                       mitre_techniques: List[Dict], 
                       mitre_embeddings: torch.Tensor, 
-                      batch_size: int = 32) -> List[Tuple]:
+                      batch_size: int = 32,
+                      use_claude_for_mapping: bool = True) -> List[Tuple]:
     """
-    Map a batch of descriptions to MITRE ATT&CK techniques using Claude API
+    Map a batch of descriptions to MITRE ATT&CK techniques
     
     Args:
         descriptions: List of use case descriptions to map
-        _model: Claude API configuration dictionary
+        st_model: SentenceTransformer model
+        claude_config: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
         mitre_embeddings: Tensor of embeddings for technique descriptions
         batch_size: Number of descriptions to process at once
+        use_claude_for_mapping: Whether to use Claude API for MITRE mapping
         
     Returns:
         List of tuples: (tactic, technique, url, tactics_list, score)
     """
-    if _model is None or mitre_embeddings is None:
+    # Check if any embedding model is available
+    if st_model is None and (claude_config is None or not claude_config.get("api_key")):
         return [("N/A", "N/A", "N/A", [], 0.0) for _ in descriptions]
+    
+    # Import hybrid embedding function
+    from modules.embedding import batch_get_embeddings_hybrid
     
     results = []
     
-    # First, check if the Claude API is available and properly configured
-    if not _model.get("api_key"):
-        st.warning("Claude API key not available. Using fallback mapping.")
-        # Return basic fallback values
-        for _ in descriptions:
-            results.append(("N/A", "N/A", "N/A", [], 0.0))
-        return results
-    
-    # Generate embeddings for all descriptions using Claude API
-    query_embeddings = batch_get_embeddings(descriptions, _model)
+    # Generate embeddings using the appropriate model
+    # This is the critical mapping functionality where Claude adds most value
+    query_embeddings = batch_get_embeddings_hybrid(
+        descriptions, 
+        st_model, 
+        claude_config, 
+        use_claude_api=use_claude_for_mapping  # Use Claude API only if specifically requested
+    )
     
     if query_embeddings is not None:
         # Perform similarity search against MITRE techniques
@@ -198,17 +211,19 @@ def batch_map_to_mitre(descriptions: List[str],
     
     return results
 
-def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
+def process_mappings(df, st_model, claude_config, mitre_techniques, mitre_embeddings, library_df, library_embeddings, use_claude_for_mapping=True):
     """
-    Main function to process mappings using Claude API
+    Main function to process mappings
     
     Args:
         df: DataFrame containing security use cases to map
-        _model: Claude API configuration dictionary
+        st_model: SentenceTransformer model
+        claude_config: Claude API configuration dictionary
         mitre_techniques: List of MITRE technique dictionaries
         mitre_embeddings: Tensor of embeddings for technique descriptions
         library_df: DataFrame containing library data
         library_embeddings: Tensor of embeddings for library descriptions
+        use_claude_for_mapping: Whether to use Claude API for MITRE mapping
         
     Returns:
         df: Updated DataFrame with mapping results
@@ -227,7 +242,7 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
     
     # First batch check library matches
     library_match_results = batch_check_library_matches(
-        descriptions, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
+        descriptions, library_df, library_embeddings, st_model, claude_config, similarity_threshold=similarity_threshold
     )
     
     # Prepare lists for rows that need model mapping
@@ -302,16 +317,22 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 # Invalid description placeholders are already set by default
                 match_sources[i] = "Invalid description"
     
-    # Label for Claude mapping
-    if _model is not None and _model.get("api_key"):
-        mapping_label = "Claude API mapping"
+    # Label for mapping source
+    if use_claude_for_mapping and claude_config is not None and claude_config.get("api_key"):
+        model_name = claude_config.get("model", "").split("-")[0].capitalize()
+        mapping_label = f"Claude {model_name} mapping"
     else:
-        mapping_label = "Basic mapping (Claude API not configured)"
+        mapping_label = "Sentence Transformer mapping"
     
-    # Batch map remaining cases using Claude API
+    # Batch map remaining cases 
     if model_map_descriptions:
         model_results = batch_map_to_mitre(
-            model_map_descriptions, _model, mitre_techniques, mitre_embeddings
+            model_map_descriptions, 
+            st_model, 
+            claude_config, 
+            mitre_techniques, 
+            mitre_embeddings,
+            use_claude_for_mapping=use_claude_for_mapping
         )
         
         # Process model results and insert at the correct positions
