@@ -16,7 +16,7 @@ from streamlit_lottie import st_lottie
 import time
 import os
 from typing import List, Dict, Tuple, Any, Optional
-import anthropic  # Added for Claude Haiku API
+import anthropic  # Added for Claude Sonnet API
 
 # Import the modules
 from analytics import render_analytics_page
@@ -215,7 +215,7 @@ if 'mitre_embeddings' not in st.session_state:
 if '_uploaded_file' not in st.session_state:
     st.session_state._uploaded_file = None
 
-# Initialize Claude Haiku Client
+# Initialize Claude Sonnet Client
 @st.cache_resource
 def initialize_claude_client():
     try:
@@ -233,25 +233,50 @@ def initialize_claude_client():
         st.error(f"Error initializing Claude client: {e}")
         return None
 
-# Function to get MITRE mapping from Claude Haiku API
+# Function to get MITRE mapping from Claude Sonnet API
 def get_claude_mitre_mapping(description, mitre_techniques, client):
     """
-    Use Claude Haiku to map a description to MITRE ATT&CK techniques
+    Use Claude Sonnet to map a description to MITRE ATT&CK techniques
+    with improved accuracy and validation
     """
     if not client or not description:
         return "N/A", "N/A", "N/A", [], 0.0
     
-    # Prepare techniques data for prompt
+    # Create a lookup dictionary for technique validation
+    technique_dict = {}
+    technique_to_tactics = {}
+    
+    for tech in mitre_techniques:
+        # Store by ID
+        technique_dict[tech['id']] = tech
+        
+        # Store by name (lowercase for case-insensitive matching)
+        technique_dict[tech['name'].lower()] = tech
+        
+        # Create mapping of technique name to valid tactics
+        technique_to_tactics[tech['name'].lower()] = tech['tactics_list']
+    
+    # Prepare techniques data for prompt - include all techniques for better context
     techniques_summary = "\n".join([
         f"- {tech['id']} - {tech['name']}: {tech['tactic']}" 
-        for tech in mitre_techniques[:20]  # Limit to 20 example techniques
+        for tech in mitre_techniques[:50]  # Include more examples for better context
     ])
     
-    # Create a system prompt for Claude
+    # Create a more detailed system prompt for Claude with specific examples
     system_prompt = f"""
     You are a security analyst specialized in mapping security use cases to the MITRE ATT&CK framework.
     Given a security use case description, you will identify the most relevant MITRE ATT&CK technique that applies to it.
-    Analyze the text carefully and match it to the most appropriate technique.
+    
+    IMPORTANT RULES:
+    1. Use ONLY techniques and tactics that exist in the MITRE ATT&CK framework
+    2. Be precise with the tactic name - it must be one of the standard MITRE tactics (Initial Access, Execution, Persistence, etc.)
+    3. For each technique, verify that the tactic you assign is valid for that technique, as techniques can appear in multiple tactics
+    4. Always check that you're using the correct tactic for the context of the use case
+    
+    EXAMPLES:
+    - For use cases related to malicious links being clicked, use "User Execution" technique with the "Execution" tactic
+    - For use cases about remote access tools, use "Remote Access Software" technique with the "Command and Control" tactic
+    - For use cases about credential theft, use "Credential Dumping" technique with the "Credential Access" tactic
     
     Your response must be a JSON object with the following format:
     {{
@@ -262,20 +287,20 @@ def get_claude_mitre_mapping(description, mitre_techniques, client):
         "explanation": "brief explanation of why this technique matches"
     }}
     
-    Here are some example MITRE ATT&CK techniques for reference:
+    Here are MITRE ATT&CK techniques for reference:
     {techniques_summary}
     """
     
     try:
-        # Call Claude Haiku API
+        # Call Claude Sonnet API
         message = client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-3-sonnet-20240229",  # Using Sonnet instead of Haiku
             max_tokens=1000,
             system=system_prompt,
             messages=[
                 {"role": "user", "content": f"Map this security use case to the MITRE ATT&CK framework: \n\n{description}"}
             ],
-            temperature=0.2
+            temperature=0.1  # Lower temperature for more deterministic results
         )
         
         # Extract JSON from the response
@@ -297,6 +322,40 @@ def get_claude_mitre_mapping(description, mitre_techniques, client):
                 technique_id = result.get('technique_id', 'N/A')
                 confidence = result.get('confidence', 0)
                 
+                # Validation step: Check if the technique exists and the tactic is valid for this technique
+                valid_mapping = False
+                correct_tactic = tactic
+                correct_technique = technique_name
+                
+                # Try to find the technique in our reference data
+                if technique_id in technique_dict:
+                    tech = technique_dict[technique_id]
+                    valid_tactics = tech['tactics_list']
+                    
+                    # Check if the assigned tactic is valid for this technique
+                    if tactic in valid_tactics:
+                        valid_mapping = True
+                        correct_technique = tech['name']  # Use the official name
+                    else:
+                        # If the tactic is invalid, use the first valid tactic
+                        correct_tactic = valid_tactics[0] if valid_tactics else tactic
+                        correct_technique = tech['name']
+                
+                # If technique wasn't found by ID, try by name
+                elif technique_name.lower() in technique_dict:
+                    tech = technique_dict[technique_name.lower()]
+                    valid_tactics = tech['tactics_list']
+                    technique_id = tech['id']  # Update the ID
+                    
+                    # Check if the assigned tactic is valid for this technique
+                    if tactic in valid_tactics:
+                        valid_mapping = True
+                        correct_technique = tech['name']  # Use the official name
+                    else:
+                        # If the tactic is invalid, use the first valid tactic
+                        correct_tactic = valid_tactics[0] if valid_tactics else tactic
+                        correct_technique = tech['name']
+                
                 # Find the URL for the technique
                 technique_url = "N/A"
                 tactics_list = []
@@ -308,7 +367,11 @@ def get_claude_mitre_mapping(description, mitre_techniques, client):
                         tactics_list = tech['tactics_list']
                         break
                 
-                return tactic, technique_name, technique_url, tactics_list, confidence / 100.0
+                # Return the correct mapping (either validated or corrected)
+                if valid_mapping:
+                    return tactic, correct_technique, technique_url, tactics_list, confidence / 100.0
+                else:
+                    return correct_tactic, correct_technique, technique_url, tactics_list, (confidence * 0.9) / 100.0  # Reduce confidence if we had to correct
             except json.JSONDecodeError:
                 # If JSON parsing fails, return a default response
                 return "Parsing Error", "Parsing Error", "N/A", [], 0.0
@@ -319,12 +382,12 @@ def get_claude_mitre_mapping(description, mitre_techniques, client):
         print(f"Error calling Claude API: {e}")
         return "API Error", str(e)[:50], "N/A", [], 0.0
 
-# Function to batch process mapping to MITRE with Claude Haiku
+# Function to batch process mapping to MITRE with Claude Sonnet
 def batch_claude_mapping(descriptions: List[str], 
                          mitre_techniques: List[Dict],
                          claude_client) -> List[Tuple]:
     """
-    Map a batch of descriptions to MITRE ATT&CK techniques using Claude Haiku API
+    Map a batch of descriptions to MITRE ATT&CK techniques using Claude Sonnet API
     """
     if not claude_client:
         return [("N/A", "N/A", "N/A", [], 0.0) for _ in descriptions]
@@ -343,7 +406,7 @@ def batch_claude_mapping(descriptions: List[str],
             results.append(("N/A", "N/A", "N/A", [], 0.0))
             continue
         
-        # Get mapping from Claude Haiku
+        # Get mapping from Claude Sonnet
         tactic, technique, url, tactics_list, confidence = get_claude_mitre_mapping(
             clean_desc, mitre_techniques, claude_client
         )
@@ -460,10 +523,20 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
     
     This version uses:
     - all-mpnet-base-v2 for library matching
-    - Claude Haiku for MITRE ATT&CK technique mapping
+    - Claude Sonnet for MITRE ATT&CK technique mapping with validation
     """
     # Fixed similarity threshold
     similarity_threshold = 0.8
+    
+    # Create lookup dictionaries for faster validation
+    technique_id_to_name = {}
+    technique_name_to_id = {}
+    technique_to_tactics = {}
+    
+    for tech in mitre_techniques:
+        technique_id_to_name[tech['id']] = tech['name']
+        technique_name_to_id[tech['name'].lower()] = tech['id']
+        technique_to_tactics[tech['name'].lower()] = set(tech['tactics_list'])
     
     # Get all descriptions at once and validate them
     descriptions = []
@@ -478,7 +551,7 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
         descriptions, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
     )
     
-    # Initialize Claude Haiku client
+    # Initialize Claude Sonnet client
     claude_client = initialize_claude_client()
     
     # Prepare lists for rows that need model mapping
@@ -514,12 +587,51 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
             technique = matched_row.get('Mapped MITRE Technique(s)', 'N/A')
             reference = matched_row.get('Reference Resource(s)', 'N/A')
             
-            tactics_list = tactic.split(', ') if tactic != 'N/A' else []
+            # Validate the tactic-technique relationship
+            validated_tactic = tactic
+            validated_technique = technique
+            
+            # Check if the technique is in our reference data
+            if technique != 'N/A':
+                # Extract the technique name (removing ID if present)
+                if ' - ' in technique:
+                    tech_name = technique.split(' - ')[1].strip().lower()
+                elif '-' in technique and technique[0] == 'T':
+                    tech_id = technique.split('-')[0].strip()
+                    if tech_id in technique_id_to_name:
+                        tech_name = technique_id_to_name[tech_id].lower()
+                    else:
+                        tech_name = technique.lower()
+                else:
+                    tech_name = technique.lower()
+                
+                # Check if this technique has valid tactics and if the assigned tactic is valid
+                if tech_name in technique_to_tactics:
+                    valid_tactics = technique_to_tactics[tech_name]
+                    
+                    # If tactic is a comma-separated list, check each tactic
+                    if ',' in tactic:
+                        tactic_list = [t.strip() for t in tactic.split(',')]
+                        validated_tactics = []
+                        
+                        for t in tactic_list:
+                            if t in valid_tactics:
+                                validated_tactics.append(t)
+                        
+                        if validated_tactics:
+                            validated_tactic = ', '.join(validated_tactics)
+                    else:
+                        # Single tactic case
+                        if tactic not in valid_tactics and valid_tactics:
+                            # If the tactic is invalid, use the first valid tactic
+                            validated_tactic = list(valid_tactics)[0]
+            
+            tactics_list = validated_tactic.split(', ') if validated_tactic != 'N/A' else []
             confidence = match_score
             
-            # Store results
-            tactics[i] = tactic
-            techniques[i] = technique
+            # Store results with validated data
+            tactics[i] = validated_tactic
+            techniques[i] = validated_technique
             references[i] = reference
             all_tactics_lists[i] = tactics_list
             confidence_scores[i] = round(confidence * 100, 2)
@@ -527,21 +639,23 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
             match_scores[i] = round(match_score * 100, 2)
             
             # Count techniques
-            if technique != 'N/A':
-                # Handle technique IDs in different formats
-                if '-' in technique:
-                    tech_id = technique.split('-')[0].strip()
-                elif ' - ' in technique:
-                    tech_id = technique.split(' - ')[0].strip()
+            if validated_technique != 'N/A':
+                # Extract the technique ID
+                if ' - ' in validated_technique:
+                    parts = validated_technique.split(' - ')
+                    tech_id = parts[0].strip()
+                    tech_name = parts[1].strip().lower()
+                elif validated_technique.startswith('T') and len(validated_technique) >= 5:
+                    # Looks like an ID
+                    tech_id = validated_technique
                 else:
-                    # Try to find the technique by name in our list
-                    tech_id = None
-                    for tech in mitre_techniques:
-                        if tech['name'].lower() == technique.lower():
-                            tech_id = tech['id']
-                            break
-                    if not tech_id:
-                        tech_id = technique  # Use technique name as fallback
+                    # Assume it's a name and look it up
+                    tech_name = validated_technique.lower()
+                    if tech_name in technique_name_to_id:
+                        tech_id = technique_name_to_id[tech_name]
+                    else:
+                        # Fall back to using the name as is
+                        tech_id = validated_technique
                 
                 techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
         else:
@@ -554,11 +668,11 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 # Invalid description placeholders are already set by default
                 match_sources[i] = "Invalid description"
     
-    # Batch map remaining cases using Claude Haiku
+    # Batch map remaining cases using Claude Sonnet
     if model_map_descriptions:
         # Progress indicator for Claude API calls
         claude_progress = st.progress(0)
-        st.write("Using Claude Haiku for remaining mappings...")
+        st.write("Using Claude Sonnet for remaining mappings...")
         
         model_results = []
         
@@ -596,13 +710,18 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
                 match_scores[idx] = 0  # No library match score
                 
                 # Count techniques - find technique ID if possible
-                found_id = None
-                for tech in mitre_techniques:
-                    if tech['name'].lower() == technique_name.lower():
-                        found_id = tech['id']
-                        break
+                if technique_name.lower() in technique_name_to_id:
+                    tech_id = technique_name_to_id[technique_name.lower()]
+                else:
+                    # Try to find by name similarity
+                    found_id = None
+                    for tech in mitre_techniques:
+                        if tech['name'].lower() == technique_name.lower():
+                            found_id = tech['id']
+                            break
+                    
+                    tech_id = found_id or technique_name
                 
-                tech_id = found_id or technique_name
                 if tech_id != "N/A" and tech_id != "Error":
                     techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
     
@@ -847,7 +966,7 @@ def main():
         This tool maps your security use cases to the MITRE ATT&CK framework using:
         
         1. Library matching for known use cases
-        2. Claude Haiku AI for new use cases mapping
+        2. Claude Sonnet AI for new use cases mapping
         3. Suggestions for additional use cases based on your log sources
         
         - Upload a CSV with security use cases
@@ -858,7 +977,7 @@ def main():
         """)
         
         st.markdown("---")
-        st.markdown("© 2025 | v1.5.0 (Claude Haiku Integration)")
+        st.markdown("© 2025 | v1.5.0 (Claude Sonnet Integration)")
 
     # Home page
     if st.session_state.page == "home":
@@ -922,7 +1041,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
                     1. **Upload** your security use cases CSV file
                     2. The tool first **checks** if the use case exists in the library
                     3. If found in library, it uses the **pre-mapped** MITRE data
-                    4. If not found, it uses **Claude Haiku AI** to analyze and map the use case
+                    4. If not found, it uses **Claude Sonnet AI** to analyze and map the use case
                     5. **View** mapped results, analytics, and export options
                     6. **Discover** additional relevant use cases based on your log sources
                     """)
@@ -931,11 +1050,11 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
                     st.markdown("### Preview of Uploaded Data")
                     st.dataframe(df.head(5), use_container_width=True)
                     
-                    # API key input for Claude Haiku
+                    # API key input for Claude Sonnet
                     api_key = st.text_input(
-                        "Enter Anthropic API Key (required for Claude Haiku mapping)",
+                        "Enter Anthropic API Key (required for Claude Sonnet mapping)",
                         type="password",
-                        help="Required to use Claude Haiku for mapping. This will be stored temporarily for this session only."
+                        help="Required to use Claude Sonnet for mapping. This will be stored temporarily for this session only."
                     )
                     
                     # Store API key in environment variable
@@ -948,7 +1067,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
                     
                     map_button_disabled = not api_key
                     if map_button_disabled:
-                        st.warning("Please enter your Anthropic API Key to enable mapping with Claude Haiku.")
+                        st.warning("Please enter your Anthropic API Key to enable mapping with Claude Sonnet.")
                     
                     if st.button("Start Mapping", key="start_mapping", disabled=map_button_disabled):
                         with st.spinner("Mapping security use cases to MITRE ATT&CK..."):
@@ -1004,7 +1123,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             - 'Log Source': The log source for the use case
             
             You'll also need:
-            - An Anthropic API key for Claude Haiku
+            - An Anthropic API key for Claude Sonnet
             """)
         
         with st.expander("🔄 Process", expanded=True):
@@ -1012,7 +1131,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             1. **Upload** your security use cases CSV file
             2. The tool first **checks** if the use case exists in the library using all-mpnet-base-v2
             3. If found in library, it uses the **pre-mapped** MITRE data
-            4. If not found, it uses **Claude Haiku AI** to analyze the use case
+            4. If not found, it uses **Claude Sonnet AI** to analyze the use case
             5. **View** mapped results, analytics, and export options
             6. **Discover** additional relevant use cases based on your log sources
             """)
@@ -1022,9 +1141,9 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             This tool leverages two AI models:
             
             - **all-mpnet-base-v2**: Used for library matching, suggestions, and other embedding tasks
-            - **Claude Haiku**: Used for mapping use cases to MITRE ATT&CK techniques
+            - **Claude Sonnet**: Used for mapping use cases to MITRE ATT&CK techniques
             
-            Claude Haiku provides more accurate and context-aware mapping than traditional embedding models.
+            Claude Sonnet provides more accurate and context-aware mapping than traditional embedding models.
             """)
 
 def render_results_page():
