@@ -4,7 +4,8 @@ import traceback
 import pandas as pd
 import requests
 import streamlit as st
-import torch  # Add missing torch import
+import torch  # Keep torch import
+import numpy as np
 
 def create_local_mitre_data_cache():
     """
@@ -147,10 +148,10 @@ def load_mitre_data():
 @st.cache_data
 def load_library_data_with_embeddings(_model):
     """
-    Load library data and compute embeddings
+    Load library data and compute embeddings using Claude API
     
     Args:
-        _model: SentenceTransformer model for creating embeddings
+        _model: Claude API configuration dict
         
     Returns:
         library_df: DataFrame containing library data
@@ -176,6 +177,9 @@ def load_library_data_with_embeddings(_model):
             if library_df[col].dtype == 'object':
                 library_df[col] = library_df[col].fillna("N/A")
         
+        # Import the batch_get_embeddings function for Claude API embeddings
+        from modules.embedding import batch_get_embeddings
+        
         # Precompute embeddings for all library entries
         descriptions = []
         for desc in library_df['Description'].tolist():
@@ -184,22 +188,14 @@ def load_library_data_with_embeddings(_model):
             else:
                 descriptions.append(str(desc))  # Ensure it's a string
         
-        # Use batching for encoding
-        batch_size = 16  # Smaller batch size for BGE models
-        all_embeddings = []
+        # Use Claude API to get embeddings
+        embeddings = batch_get_embeddings(descriptions, _model)
         
-        for i in range(0, len(descriptions), batch_size):
-            batch = descriptions[i:i+batch_size]
-            # BGE models work best with normalize_embeddings=True
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True, normalize_embeddings=True)
-            all_embeddings.append(batch_embeddings)
-        
-        # Combine all embeddings
-        if all_embeddings:
-            embeddings = torch.cat(all_embeddings, dim=0)
+        if embeddings is not None:
             return library_df, embeddings
-        
-        return library_df, None
+        else:
+            st.warning("Failed to generate embeddings for library data. Library matching may not work correctly.")
+            return library_df, None
         
     except Exception as e:
         st.warning(f"Warning: Could not process library data: {e}")
