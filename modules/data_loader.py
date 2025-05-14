@@ -177,6 +177,11 @@ def load_library_data_with_embeddings(_model):
             if library_df[col].dtype == 'object':
                 library_df[col] = library_df[col].fillna("N/A")
         
+        # Check if Claude API is configured properly
+        if _model is None:
+            st.warning("Claude API not configured. Library matching may be unavailable.")
+            return library_df, None
+        
         # Import the batch_get_embeddings function for Claude API embeddings
         from modules.embedding import batch_get_embeddings
         
