@@ -1,10 +1,10 @@
-import torch
+# embedding.py - NO TORCH DEPENDENCIES
 import streamlit as st
 import requests
 import json
 import numpy as np
 from typing import List, Dict, Any, Optional, Union
-import tensorflow as tf  # Alternative to torch for embeddings if needed
+import tensorflow as tf
 
 # Claude API configuration constants
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
@@ -19,62 +19,48 @@ CLAUDE_MODELS = {
 @st.cache_resource
 def load_sentence_transformer_model():
     """
-    Load the sentence transformer model for embeddings
+    Load a simple embedding model (no PyTorch dependency)
     
     Returns:
-        model: A simple embedding model using TensorFlow instead of torch
+        model: A simple embedding model using TensorFlow
     """
     try:
-        # Create a basic TF-based encoder model instead of using SentenceTransformer
-        # This avoids the torch._classes issue
-        class SimpleTFEncoder:
+        # Create a basic TF-based encoder
+        class SimpleEncoder:
             def __init__(self):
-                # Initialize Universal Sentence Encoder from TF Hub if available
-                # Fallback to simpler embedding if not
-                try:
-                    import tensorflow_hub as hub
-                    self.encoder = hub.load("https://tfhub.dev/google/universal-sentence-encoder/4")
-                except:
-                    # Fallback to simple word embedding + averaging
-                    self.encoder = None
-                    # Use TF's text vectorization layer as fallback
-                    self.vectorizer = tf.keras.layers.TextVectorization(
-                        max_tokens=10000,
-                        output_mode='int',
-                        output_sequence_length=100
-                    )
-                    # Simple embedding layer
-                    self.embedding = tf.keras.layers.Embedding(
-                        input_dim=10000,
-                        output_dim=512,
-                        mask_zero=True
-                    )
-                    # Adapt the vectorizer with some sample text
-                    self.vectorizer.adapt(['sample text for adaptation'])
+                # Initialize with a simple word embedding approach
+                self.vectorizer = tf.keras.layers.TextVectorization(
+                    max_tokens=10000,
+                    output_mode='int',
+                    output_sequence_length=100
+                )
+                # Simple embedding layer
+                self.embedding = tf.keras.layers.Embedding(
+                    input_dim=10000,
+                    output_dim=512,
+                    mask_zero=True
+                )
+                # Adapt the vectorizer with some sample text
+                self.vectorizer.adapt(['sample text for adaptation'])
             
             def encode(self, texts, convert_to_tensor=False, convert_to_numpy=False):
                 if not isinstance(texts, list):
                     texts = [texts]
                 
-                if self.encoder is not None:
-                    # Use Universal Sentence Encoder
-                    embeddings = self.encoder(texts).numpy()
-                else:
-                    # Use simple embedding + mean pooling
-                    vectors = self.vectorizer(texts)
-                    embeddings = self.embedding(vectors).numpy()
-                    # Mean pooling
-                    embeddings = np.mean(embeddings, axis=1)
+                # Use simple embedding + mean pooling
+                vectors = self.vectorizer(texts)
+                embeddings = self.embedding(vectors).numpy()
+                # Mean pooling
+                embeddings = np.mean(embeddings, axis=1)
                 
                 if convert_to_tensor:
-                    import tensorflow as tf
                     return tf.convert_to_tensor(embeddings)
                 elif convert_to_numpy:
                     return embeddings
                 else:
                     return embeddings
         
-        return SimpleTFEncoder()
+        return SimpleEncoder()
     except Exception as e:
         st.error(f"Error loading embedding model: {e}")
         return None
