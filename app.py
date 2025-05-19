@@ -1,65 +1,4 @@
-# Optimized function to load and cache library data with embeddings (Updated for Query support)
-@st.cache_data
-def load_library_data_with_embeddings(_model):
-    try:
-        # Read library.csv file
-        try:
-            library_df = pd.read_csv("library.csv")
-        except:
-            st.warning("Could not load library.csv file. Starting with an empty library.")
-            # Create an empty DataFrame with required columns (now including Query)
-            library_df = pd.DataFrame(columns=['Use Case Name', 'Description', 'Log Source', 
-                                               'Mapped MITRE Tactic(s)', 'Mapped MITRE Technique(s)', 
-                                               'Reference Resource(s)', 'Query'])
-        
-        if library_df.empty:
-            return None, None
-        
-        # Fill NaN values with placeholders
-        for col in library_df.columns:
-            if library_df[col].dtype == 'object':
-                library_df[col] = library_df[col].fillna("N/A")
-        
-        # Precompute embeddings for all library entries (combine description and query)
-        combined_texts = []
-        for _, row in library_df.iterrows():
-            desc = row.get('Description', '')
-            query = row.get('Query', '') if 'Query' in row else ''
-            
-            # Handle NaN values
-            if pd.isna(desc) or isinstance(desc, float):
-                desc = "No description available"
-            if pd.isna(query) or isinstance(query, float):
-                query = ""
-            
-            # Combine description and query for embedding
-            combined_text = str(desc)
-            if query:
-                combined_text += " " + str(query)
-            
-            combined_texts.append(combined_text)
-        
-        # Use batching for encoding
-        batch_size = 32
-        all_embeddings = []
-        
-        for i in range(0, len(combined_texts), batch_size):
-            batch = combined_texts[i:i+batch_size]
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
-            all_embeddings.append(batch_embeddings)
-        
-        # Combine all embeddings
-        if all_embeddings:
-            embeddings = torch.cat(all_embeddings, dim=0)
-            return library_df, embeddings
-        
-        return library_df, None
-        
-    except Exception as e:
-        st.warning(f"Warning: Could not load library data: {e}")
-        return None, None
-
-# Create navigator layer function
+# app.py - Main MITRE ATT&CK Mapping Tool
 
 import pandas as pd
 import streamlit as st
@@ -621,110 +560,6 @@ def batch_check_library_matches(descriptions: List[str],
                 all_results.append((None, 0.0, "No match found in library"))
     
     return all_results
-def batch_check_library_matches(queries: List[str],
-                              library_df: pd.DataFrame,
-                              library_embeddings: torch.Tensor,
-                              _model: SentenceTransformer,
-                              batch_size: int = 32,
-                              similarity_threshold: float = 0.8) -> List[Tuple]:
-    """
-    Check for matches in the library in batches for better performance.
-    Now focuses on Query matching only.
-    Returns a list of tuples: (matched_row, score, match_message)
-    """
-    if library_df is None or library_df.empty or library_embeddings is None:
-        return [(None, 0.0, "No library data available") for _ in queries]
-    
-    results = []
-    
-    # First try exact matches (fast text comparison) - only on queries
-    exact_matches = {}
-    for i, query in enumerate(queries):
-        # Handle NaN, None or float values
-        if pd.isna(query) or query is None or isinstance(query, float) or query == "N/A":
-            exact_matches[i] = (None, 0.0, "No query available")
-            continue
-            
-        # Convert to lowercase for case-insensitive matching
-        try:
-            lower_query = str(query).lower()
-            
-            # Check if there's an exact match in library (checking query column if available)
-            if 'Query' in library_df.columns:
-                matches = library_df[library_df['Query'].fillna('').str.lower() == lower_query]
-                if not matches.empty:
-                    exact_matches[i] = (matches.iloc[0], 1.0, "Exact query match found in library")
-                    continue
-        except Exception as e:
-            # Handle any errors in string operations
-            exact_matches[i] = (None, 0.0, f"Error processing query: {str(e)}")
-    
-    # Process queries in batches for embeddings
-    remaining_indices = [i for i in range(len(queries)) if i not in exact_matches]
-    
-    # Validate remaining queries for encoding
-    valid_indices = []
-    valid_queries = []
-    
-    for idx in remaining_indices:
-        query = queries[idx]
-        
-        # Handle None or non-string values
-        if pd.isna(query) or query is None or isinstance(query, float) or query == "N/A":
-            results.append((idx, (None, 0.0, "No valid query available")))
-        else:
-            query_text = str(query).strip()
-            if query_text:
-                valid_indices.append(idx)
-                valid_queries.append(query_text)
-            else:
-                results.append((idx, (None, 0.0, "Empty query")))
-    
-    # Skip if no valid queries remain
-    if not valid_queries:
-        return [exact_matches.get(i, (None, 0.0, "No match found in library")) for i in range(len(queries))]
-    
-    # Encode in batches
-    for i in range(0, len(valid_queries), batch_size):
-        batch = valid_queries[i:i+batch_size]
-        try:
-            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
-            
-            # Perform search for this batch using PyTorch
-            for j, query_embedding in enumerate(batch_embeddings):
-                best_score, best_idx = cosine_similarity_search(query_embedding, library_embeddings)
-                
-                orig_idx = valid_indices[i + j]
-                
-                if best_score >= similarity_threshold:
-                    results.append((orig_idx, (library_df.iloc[best_idx], best_score, 
-                                f"Similar query match found in library (score: {best_score:.2f})")))
-                else:
-                    results.append((orig_idx, (None, 0.0, "No similar query found in library")))
-        except Exception as e:
-            # Handle encoding errors
-            for j in range(len(batch)):
-                if i+j < len(valid_indices):
-                    orig_idx = valid_indices[i + j]
-                    results.append((orig_idx, (None, 0.0, f"Error during embedding: {str(e)}")))
-    
-    # Combine exact matches and embedding-based matches
-    all_results = []
-    for i in range(len(queries)):
-        if i in exact_matches:
-            all_results.append(exact_matches[i])
-        else:
-            # Find the result for this index
-            result_found = False
-            for idx, result in results:
-                if idx == i:
-                    all_results.append(result)
-                    result_found = True
-                    break
-            if not result_found:
-                all_results.append((None, 0.0, "No match found in library"))
-    
-    return all_results
 
 # Main optimized mapping processing function (Updated for Query support)
 def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
@@ -959,455 +794,6 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
     df['Library Match Score (%)'] = match_scores
     
     return df, techniques_count
-def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
-    """
-    Main function to process mappings in an optimized way
-    
-    This version uses:
-    - all-mpnet-base-v2 for library matching based on queries
-    - Claude Sonnet for MITRE ATT&CK technique mapping with validation based on queries
-    - Focus on Query column for mapping (required)
-    """
-    # Check if Query column exists
-    if 'Query' not in df.columns:
-        st.error("Query column is required for mapping. Please ensure your CSV has a 'Query' column.")
-        return df, {}
-    
-    # Fixed similarity threshold
-    similarity_threshold = 0.8
-    
-    # Create lookup dictionaries for faster validation
-    technique_id_to_name = {}
-    technique_name_to_id = {}
-    technique_to_tactics = {}
-    
-    for tech in mitre_techniques:
-        technique_id_to_name[tech['id']] = tech['name']
-        technique_name_to_id[tech['name'].lower()] = tech['id']
-        technique_to_tactics[tech['name'].lower()] = set(tech['tactics_list'])
-    
-    # Get all queries and validate them
-    queries = []
-    
-    for query in df['Query'].tolist():
-        if pd.isna(query) or query is None or isinstance(query, float):
-            queries.append("N/A")
-        else:
-            queries.append(str(query))
-    
-    # First batch check library matches (using sentence-transformers model with query focus)
-    library_match_results = batch_check_library_matches(
-        queries, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
-    )
-    
-    # Initialize Claude Sonnet client
-    claude_client = initialize_claude_client()
-    
-    # Prepare lists for rows that need model mapping
-    model_map_indices = []
-    model_map_queries = []
-    
-    # Process results and collect cases needing model mapping
-    tactics = []
-    techniques = []
-    references = []
-    all_tactics_lists = []
-    confidence_scores = []
-    match_sources = []
-    match_scores = []
-    techniques_count = {}
-    
-    # Make sure all lists have entries for each row in the dataframe
-    for _ in range(len(df)):
-        tactics.append("N/A")
-        techniques.append("N/A")
-        references.append("N/A")
-        all_tactics_lists.append([])
-        confidence_scores.append(0)
-        match_sources.append("N/A")
-        match_scores.append(0)
-    
-    for i, library_match in enumerate(library_match_results):
-        matched_row, match_score, match_source = library_match
-        
-        if matched_row is not None:
-            # Use library match
-            tactic = matched_row.get('Mapped MITRE Tactic(s)', 'N/A')
-            technique = matched_row.get('Mapped MITRE Technique(s)', 'N/A')
-            reference = matched_row.get('Reference Resource(s)', 'N/A')
-            
-            # Validate the tactic-technique relationship
-            validated_tactic = tactic
-            validated_technique = technique
-            
-            # Check if the technique is in our reference data
-            if technique != 'N/A':
-                # Extract the technique name (removing ID if present)
-                if ' - ' in technique:
-                    tech_name = technique.split(' - ')[1].strip().lower()
-                elif '-' in technique and technique[0] == 'T':
-                    tech_id = technique.split('-')[0].strip()
-                    if tech_id in technique_id_to_name:
-                        tech_name = technique_id_to_name[tech_id].lower()
-                    else:
-                        tech_name = technique.lower()
-                else:
-                    tech_name = technique.lower()
-                
-                # Check if this technique has valid tactics and if the assigned tactic is valid
-                if tech_name in technique_to_tactics:
-                    valid_tactics = technique_to_tactics[tech_name]
-                    
-                    # If tactic is a comma-separated list, check each tactic
-                    if ',' in tactic:
-                        tactic_list = [t.strip() for t in tactic.split(',')]
-                        validated_tactics = []
-                        
-                        for t in tactic_list:
-                            if t in valid_tactics:
-                                validated_tactics.append(t)
-                        
-                        if validated_tactics:
-                            validated_tactic = ', '.join(validated_tactics)
-                    else:
-                        # Single tactic case
-                        if tactic not in valid_tactics and valid_tactics:
-                            # If the tactic is invalid, use the first valid tactic
-                            validated_tactic = list(valid_tactics)[0]
-            
-            tactics_list = validated_tactic.split(', ') if validated_tactic != 'N/A' else []
-            confidence = match_score
-            
-            # Store results with validated data
-            tactics[i] = validated_tactic
-            techniques[i] = validated_technique
-            references[i] = reference
-            all_tactics_lists[i] = tactics_list
-            confidence_scores[i] = round(confidence * 100, 2)
-            match_sources[i] = match_source
-            match_scores[i] = round(match_score * 100, 2)
-            
-            # Count techniques
-            if validated_technique != 'N/A':
-                # Extract the technique ID
-                if ' - ' in validated_technique:
-                    parts = validated_technique.split(' - ')
-                    tech_id = parts[0].strip()
-                    tech_name = parts[1].strip().lower()
-                elif validated_technique.startswith('T') and len(validated_technique) >= 5:
-                    # Looks like an ID
-                    tech_id = validated_technique
-                else:
-                    # Assume it's a name and look it up
-                    tech_name = validated_technique.lower()
-                    if tech_name in technique_name_to_id:
-                        tech_id = technique_name_to_id[tech_name]
-                    else:
-                        # Fall back to using the name as is
-                        tech_id = validated_technique
-                
-                techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
-        else:
-            # Check if we have valid query for mapping
-            has_valid_query = queries[i] != "N/A" and not pd.isna(queries[i]) and queries[i].strip()
-            
-            if has_valid_query:
-                # Mark for model mapping
-                model_map_indices.append(i)
-                model_map_queries.append(queries[i])
-            else:
-                # Invalid query placeholder is already set by default
-                match_sources[i] = "Invalid or missing query"
-    
-    # Batch map remaining cases using Claude Sonnet
-    if model_map_queries:
-        # Progress indicator for Claude API calls
-        claude_progress = st.progress(0)
-        st.write("Using Claude Sonnet for query-based mappings...")
-        
-        model_results = []
-        
-        # Process in smaller batches to update progress
-        batch_size = 5  # Smaller batch size to show progress more frequently
-        total_batches = (len(model_map_queries) + batch_size - 1) // batch_size
-        
-        for b in range(total_batches):
-            start_idx = b * batch_size
-            end_idx = min((b + 1) * batch_size, len(model_map_queries))
-            
-            batch_queries = model_map_queries[start_idx:end_idx]
-            batch_results = batch_claude_mapping(
-                batch_queries, mitre_techniques, claude_client
-            )
-            
-            model_results.extend(batch_results)
-            
-            # Update progress
-            progress = (b + 1) / total_batches
-            claude_progress.progress(progress)
-        
-        # Process Claude results and insert at the correct positions
-        for (i, idx) in enumerate(model_map_indices):
-            if i < len(model_results):
-                tactic, technique_name, reference, tactics_list, confidence = model_results[i]
-                
-                # Store the results
-                tactics[idx] = tactic
-                techniques[idx] = technique_name
-                references[idx] = reference
-                all_tactics_lists[idx] = tactics_list
-                confidence_scores[idx] = round(confidence * 100, 2)
-                match_sources[idx] = "Claude AI query mapping"
-                match_scores[idx] = 0  # No library match score
-                
-                # Count techniques - find technique ID if possible
-                if technique_name.lower() in technique_name_to_id:
-                    tech_id = technique_name_to_id[technique_name.lower()]
-                else:
-                    # Try to find by name similarity
-                    found_id = None
-                    for tech in mitre_techniques:
-                        if tech['name'].lower() == technique_name.lower():
-                            found_id = tech['id']
-                            break
-                    
-                    tech_id = found_id or technique_name
-                
-                if tech_id != "N/A" and tech_id != "Error":
-                    techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
-    
-    # Add results to dataframe
-    df['Mapped MITRE Tactic(s)'] = tactics
-    df['Mapped MITRE Technique(s)'] = techniques
-    df['Reference Resource(s)'] = references
-    df['Confidence Score (%)'] = confidence_scores
-    df['Match Source'] = match_sources
-    df['Library Match Score (%)'] = match_scores
-    
-    return df, techniques_count
-    technique_id_to_name = {}
-    technique_name_to_id = {}
-    technique_to_tactics = {}
-    
-    for tech in mitre_techniques:
-        technique_id_to_name[tech['id']] = tech['name']
-        technique_name_to_id[tech['name'].lower()] = tech['id']
-        technique_to_tactics[tech['name'].lower()] = set(tech['tactics_list'])
-    
-    # Get all descriptions and queries at once and validate them
-    descriptions = []
-    queries = []
-    
-    for desc in df['Description'].tolist():
-        if pd.isna(desc) or desc is None or isinstance(desc, float):
-            descriptions.append("No description available")
-        else:
-            descriptions.append(str(desc))
-    
-    # Handle Query column if it exists
-    if 'Query' in df.columns:
-        for query in df['Query'].tolist():
-            if pd.isna(query) or query is None or isinstance(query, float):
-                queries.append("")
-            else:
-                queries.append(str(query))
-    else:
-        queries = [""] * len(descriptions)
-    
-    # First batch check library matches (using sentence-transformers model with query support)
-    library_match_results = batch_check_library_matches(
-        descriptions, queries, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
-    )
-    
-    # Initialize Claude Sonnet client
-    claude_client = initialize_claude_client()
-    
-    # Prepare lists for rows that need model mapping
-    model_map_indices = []
-    model_map_descriptions = []
-    model_map_queries = []
-    
-    # Process results and collect cases needing model mapping
-    tactics = []
-    techniques = []
-    references = []
-    all_tactics_lists = []
-    confidence_scores = []
-    match_sources = []
-    match_scores = []
-    techniques_count = {}
-    
-    # Make sure all lists have entries for each row in the dataframe
-    for _ in range(len(df)):
-        tactics.append("N/A")
-        techniques.append("N/A")
-        references.append("N/A")
-        all_tactics_lists.append([])
-        confidence_scores.append(0)
-        match_sources.append("N/A")
-        match_scores.append(0)
-    
-    for i, library_match in enumerate(library_match_results):
-        matched_row, match_score, match_source = library_match
-        
-        if matched_row is not None:
-            # Use library match
-            tactic = matched_row.get('Mapped MITRE Tactic(s)', 'N/A')
-            technique = matched_row.get('Mapped MITRE Technique(s)', 'N/A')
-            reference = matched_row.get('Reference Resource(s)', 'N/A')
-            
-            # Validate the tactic-technique relationship
-            validated_tactic = tactic
-            validated_technique = technique
-            
-            # Check if the technique is in our reference data
-            if technique != 'N/A':
-                # Extract the technique name (removing ID if present)
-                if ' - ' in technique:
-                    tech_name = technique.split(' - ')[1].strip().lower()
-                elif '-' in technique and technique[0] == 'T':
-                    tech_id = technique.split('-')[0].strip()
-                    if tech_id in technique_id_to_name:
-                        tech_name = technique_id_to_name[tech_id].lower()
-                    else:
-                        tech_name = technique.lower()
-                else:
-                    tech_name = technique.lower()
-                
-                # Check if this technique has valid tactics and if the assigned tactic is valid
-                if tech_name in technique_to_tactics:
-                    valid_tactics = technique_to_tactics[tech_name]
-                    
-                    # If tactic is a comma-separated list, check each tactic
-                    if ',' in tactic:
-                        tactic_list = [t.strip() for t in tactic.split(',')]
-                        validated_tactics = []
-                        
-                        for t in tactic_list:
-                            if t in valid_tactics:
-                                validated_tactics.append(t)
-                        
-                        if validated_tactics:
-                            validated_tactic = ', '.join(validated_tactics)
-                    else:
-                        # Single tactic case
-                        if tactic not in valid_tactics and valid_tactics:
-                            # If the tactic is invalid, use the first valid tactic
-                            validated_tactic = list(valid_tactics)[0]
-            
-            tactics_list = validated_tactic.split(', ') if validated_tactic != 'N/A' else []
-            confidence = match_score
-            
-            # Store results with validated data
-            tactics[i] = validated_tactic
-            techniques[i] = validated_technique
-            references[i] = reference
-            all_tactics_lists[i] = tactics_list
-            confidence_scores[i] = round(confidence * 100, 2)
-            match_sources[i] = match_source
-            match_scores[i] = round(match_score * 100, 2)
-            
-            # Count techniques
-            if validated_technique != 'N/A':
-                # Extract the technique ID
-                if ' - ' in validated_technique:
-                    parts = validated_technique.split(' - ')
-                    tech_id = parts[0].strip()
-                    tech_name = parts[1].strip().lower()
-                elif validated_technique.startswith('T') and len(validated_technique) >= 5:
-                    # Looks like an ID
-                    tech_id = validated_technique
-                else:
-                    # Assume it's a name and look it up
-                    tech_name = validated_technique.lower()
-                    if tech_name in technique_name_to_id:
-                        tech_id = technique_name_to_id[tech_name]
-                    else:
-                        # Fall back to using the name as is
-                        tech_id = validated_technique
-                
-                techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
-        else:
-            # Check if we have valid description or query for mapping
-            has_valid_desc = descriptions[i] != "No description available" and not pd.isna(descriptions[i])
-            has_valid_query = i < len(queries) and queries[i] and not pd.isna(queries[i])
-            
-            if has_valid_desc or has_valid_query:
-                # Mark for model mapping
-                model_map_indices.append(i)
-                model_map_descriptions.append(descriptions[i])
-                model_map_queries.append(queries[i] if i < len(queries) else "")
-            else:
-                # Invalid description and query placeholders are already set by default
-                match_sources[i] = "Invalid description and query"
-    
-    # Batch map remaining cases using Claude Sonnet
-    if model_map_descriptions:
-        # Progress indicator for Claude API calls
-        claude_progress = st.progress(0)
-        st.write("Using Claude Sonnet for remaining mappings...")
-        
-        model_results = []
-        
-        # Process in smaller batches to update progress
-        batch_size = 5  # Smaller batch size to show progress more frequently
-        total_batches = (len(model_map_descriptions) + batch_size - 1) // batch_size
-        
-        for b in range(total_batches):
-            start_idx = b * batch_size
-            end_idx = min((b + 1) * batch_size, len(model_map_descriptions))
-            
-            batch_descriptions = model_map_descriptions[start_idx:end_idx]
-            batch_queries = model_map_queries[start_idx:end_idx]
-            batch_results = batch_claude_mapping(
-                batch_descriptions, batch_queries, mitre_techniques, claude_client
-            )
-            
-            model_results.extend(batch_results)
-            
-            # Update progress
-            progress = (b + 1) / total_batches
-            claude_progress.progress(progress)
-        
-        # Process Claude results and insert at the correct positions
-        for (i, idx) in enumerate(model_map_indices):
-            if i < len(model_results):
-                tactic, technique_name, reference, tactics_list, confidence = model_results[i]
-                
-                # Store the results
-                tactics[idx] = tactic
-                techniques[idx] = technique_name
-                references[idx] = reference
-                all_tactics_lists[idx] = tactics_list
-                confidence_scores[idx] = round(confidence * 100, 2)
-                match_sources[idx] = "Claude AI mapping"
-                match_scores[idx] = 0  # No library match score
-                
-                # Count techniques - find technique ID if possible
-                if technique_name.lower() in technique_name_to_id:
-                    tech_id = technique_name_to_id[technique_name.lower()]
-                else:
-                    # Try to find by name similarity
-                    found_id = None
-                    for tech in mitre_techniques:
-                        if tech['name'].lower() == technique_name.lower():
-                            found_id = tech['id']
-                            break
-                    
-                    tech_id = found_id or technique_name
-                
-                if tech_id != "N/A" and tech_id != "Error":
-                    techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
-    
-    # Add results to dataframe
-    df['Mapped MITRE Tactic(s)'] = tactics
-    df['Mapped MITRE Technique(s)'] = techniques
-    df['Reference Resource(s)'] = references
-    df['Confidence Score (%)'] = confidence_scores
-    df['Match Source'] = match_sources
-    df['Library Match Score (%)'] = match_scores
-    
-    return df, techniques_count
 
 # Load embedding model with error handling
 @st.cache_resource
@@ -1482,7 +868,7 @@ def get_mitre_embeddings(_model, techniques):
         st.error(f"Error computing embeddings: {e}")
         return None
 
-# Optimized function to load and cache library data with embeddings (Query focused)
+# Optimized function to load and cache library data with embeddings (Updated for Query support)
 @st.cache_data
 def load_library_data_with_embeddings(_model):
     try:
@@ -1491,7 +877,7 @@ def load_library_data_with_embeddings(_model):
             library_df = pd.read_csv("library.csv")
         except:
             st.warning("Could not load library.csv file. Starting with an empty library.")
-            # Create an empty DataFrame with required columns (now requiring Query)
+            # Create an empty DataFrame with required columns (now including Query)
             library_df = pd.DataFrame(columns=['Use Case Name', 'Description', 'Log Source', 
                                                'Mapped MITRE Tactic(s)', 'Mapped MITRE Technique(s)', 
                                                'Reference Resource(s)', 'Query'])
@@ -1504,28 +890,31 @@ def load_library_data_with_embeddings(_model):
             if library_df[col].dtype == 'object':
                 library_df[col] = library_df[col].fillna("N/A")
         
-        # Precompute embeddings for all library entries (focus on Query column)
-        query_texts = []
+        # Precompute embeddings for all library entries (combine description and query)
+        combined_texts = []
         for _, row in library_df.iterrows():
-            query = row.get('Query', '')
+            desc = row.get('Description', '')
+            query = row.get('Query', '') if 'Query' in row else ''
             
             # Handle NaN values
-            if pd.isna(query) or isinstance(query, float) or query == 'N/A':
-                # If no query, fall back to description for embedding
-                desc = row.get('Description', '')
-                if pd.isna(desc) or isinstance(desc, float):
-                    query_texts.append("No query or description available")
-                else:
-                    query_texts.append(str(desc))
-            else:
-                query_texts.append(str(query))
+            if pd.isna(desc) or isinstance(desc, float):
+                desc = "No description available"
+            if pd.isna(query) or isinstance(query, float):
+                query = ""
+            
+            # Combine description and query for embedding
+            combined_text = str(desc)
+            if query:
+                combined_text += " " + str(query)
+            
+            combined_texts.append(combined_text)
         
         # Use batching for encoding
         batch_size = 32
         all_embeddings = []
         
-        for i in range(0, len(query_texts), batch_size):
-            batch = query_texts[i:i+batch_size]
+        for i in range(0, len(combined_texts), batch_size):
+            batch = combined_texts[i:i+batch_size]
             batch_embeddings = _model.encode(batch, convert_to_tensor=True)
             all_embeddings.append(batch_embeddings)
         
@@ -1540,6 +929,7 @@ def load_library_data_with_embeddings(_model):
         st.warning(f"Warning: Could not load library data: {e}")
         return None, None
 
+# Create navigator layer function
 def create_navigator_layer(techniques_count):
     try:
         techniques_data = []
