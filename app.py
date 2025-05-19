@@ -57,7 +57,9 @@ def load_library_data_with_embeddings(_model):
         
     except Exception as e:
         st.warning(f"Warning: Could not load library data: {e}")
-        return None, None app.py - Main MITRE ATT&CK Mapping Tool
+        return None, None
+
+# Create navigator layer function
 
 import pandas as pd
 import streamlit as st
