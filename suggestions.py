@@ -1,4 +1,4 @@
-# suggestions.py - Suggestions Module for MITRE ATT&CK Mapping Tool
+# suggestions.py - Suggestions Module for MITRE ATT&CK Mapping Tool (Updated for Query support)
 
 import pandas as pd
 import streamlit as st
@@ -7,6 +7,7 @@ def get_suggested_use_cases(uploaded_df, library_df):
     """
     Find use cases from the library that match log sources in the uploaded data
     but aren't already present in the uploaded data.
+    Now supports Query column matching.
     
     Returns a DataFrame with suggested use cases.
     """
@@ -31,20 +32,36 @@ def get_suggested_use_cases(uploaded_df, library_df):
     # Step 2: Find matching use cases in the library based on log sources
     matching_use_cases = []
     
-    # Get set of existing use case descriptions for deduplication
+    # Get set of existing use case descriptions and queries for deduplication
     existing_descriptions = set()
+    existing_queries = set()
+    
     if 'Description' in uploaded_df.columns:
         existing_descriptions = set(uploaded_df['Description'].fillna('').astype(str).str.lower())
+    
+    if 'Query' in uploaded_df.columns:
+        existing_queries = set(uploaded_df['Query'].fillna('').astype(str).str.lower())
     
     # For each library entry, check if its log source matches any user log source
     for _, lib_row in library_df.iterrows():
         lib_log_source = str(lib_row.get('Log Source', ''))
         lib_description = str(lib_row.get('Description', '')).lower()
+        lib_query = str(lib_row.get('Query', '')).lower() if 'Query' in lib_row else ''
         
         # Check if any user log source matches this library entry's log source
         if any(user_source.lower() in lib_log_source.lower() for user_source in user_log_sources):
-            # Check if this use case is already in the user's data (by description)
-            if lib_description not in existing_descriptions:
+            # Check if this use case is already in the user's data (by description or query)
+            is_duplicate = False
+            
+            # Check description duplication
+            if lib_description in existing_descriptions:
+                is_duplicate = True
+            
+            # Check query duplication if both have queries
+            if not is_duplicate and lib_query and existing_queries and lib_query in existing_queries:
+                is_duplicate = True
+            
+            if not is_duplicate:
                 matching_use_cases.append(lib_row)
     
     # If we have matches, convert to DataFrame
@@ -64,7 +81,7 @@ def get_suggested_use_cases(uploaded_df, library_df):
         # Include only relevant columns and rename for clarity
         needed_columns = ['Use Case Name', 'Description', 'Log Source', 
                           'Mapped MITRE Tactic(s)', 'Mapped MITRE Technique(s)',
-                          'Reference Resource(s)', 'Search', 'Relevance']
+                          'Reference Resource(s)', 'Query', 'Relevance']
         
         # Filter columns that exist
         actual_columns = [col for col in needed_columns if col in suggestions_df.columns]
@@ -74,7 +91,7 @@ def get_suggested_use_cases(uploaded_df, library_df):
 
 def render_suggestions_page():
     """
-    Render the suggestions page in the Streamlit app
+    Render the suggestions page in the Streamlit app (Updated for Query support)
     """
     st.markdown("# 🔍 Suggested Use Cases")
     
@@ -136,6 +153,11 @@ def render_suggestions_page():
                         st.markdown(f"**Log Source:** {selected_row.get('Log Source', 'N/A')}")
                         st.markdown(f"**Description:**")
                         st.markdown(f"{selected_row.get('Description', 'No description available')}")
+                        
+                        # Display Query if available
+                        if 'Query' in selected_row and selected_row['Query'] != 'N/A' and not pd.isna(selected_row['Query']):
+                            st.markdown("#### Security Query")
+                            st.code(selected_row['Query'], language="sql")
                     
                     with col2:
                         st.markdown("#### MITRE ATT&CK Mapping")
@@ -146,11 +168,6 @@ def render_suggestions_page():
                         if 'Reference Resource(s)' in selected_row and selected_row['Reference Resource(s)'] != 'N/A':
                             st.markdown("#### Reference Resources")
                             st.markdown(f"{selected_row['Reference Resource(s)']}")
-                    
-                    # Display search query in a separate section
-                    if 'Search' in selected_row and selected_row['Search'] != 'N/A' and not pd.isna(selected_row['Search']):
-                        st.markdown("### Search Query")
-                        st.code(selected_row['Search'], language="sql")
                 
                 # Download option
                 st.download_button(
@@ -161,6 +178,12 @@ def render_suggestions_page():
                 )
             else:
                 st.info("No additional use cases found based on your log sources.")
+                st.markdown("""
+                **Why might there be no suggestions?**
+                - Your uploaded use cases may already cover all available techniques for your log sources
+                - The library may not have additional use cases for your specific log sources
+                - Try uploading use cases with different or additional log sources
+                """)
         else:
             st.warning("Library data is not available. Cannot provide suggestions without a reference library.")
     else:
