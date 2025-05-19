@@ -1,4 +1,4 @@
-# analytics.py - MITRE ATT&CK Analytics Module (Updated for Query support)
+# analytics.py - MITRE ATT&CK Analytics Module
 
 import pandas as pd
 import streamlit as st
@@ -44,7 +44,7 @@ def normalize_tactic(tactic):
 
 def render_analytics_page(mitre_techniques):
     """
-    Analytics page with techniques and tactics visualization (Updated for Query support)
+    Analytics page with techniques and tactics visualization
     """
     st.markdown("# 📈 Coverage Analytics")
     
