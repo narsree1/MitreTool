@@ -1,4 +1,63 @@
-# app.py - Main MITRE ATT&CK Mapping Tool
+# Optimized function to load and cache library data with embeddings (Updated for Query support)
+@st.cache_data
+def load_library_data_with_embeddings(_model):
+    try:
+        # Read library.csv file
+        try:
+            library_df = pd.read_csv("library.csv")
+        except:
+            st.warning("Could not load library.csv file. Starting with an empty library.")
+            # Create an empty DataFrame with required columns (now including Query)
+            library_df = pd.DataFrame(columns=['Use Case Name', 'Description', 'Log Source', 
+                                               'Mapped MITRE Tactic(s)', 'Mapped MITRE Technique(s)', 
+                                               'Reference Resource(s)', 'Query'])
+        
+        if library_df.empty:
+            return None, None
+        
+        # Fill NaN values with placeholders
+        for col in library_df.columns:
+            if library_df[col].dtype == 'object':
+                library_df[col] = library_df[col].fillna("N/A")
+        
+        # Precompute embeddings for all library entries (combine description and query)
+        combined_texts = []
+        for _, row in library_df.iterrows():
+            desc = row.get('Description', '')
+            query = row.get('Query', '') if 'Query' in row else ''
+            
+            # Handle NaN values
+            if pd.isna(desc) or isinstance(desc, float):
+                desc = "No description available"
+            if pd.isna(query) or isinstance(query, float):
+                query = ""
+            
+            # Combine description and query for embedding
+            combined_text = str(desc)
+            if query:
+                combined_text += " " + str(query)
+            
+            combined_texts.append(combined_text)
+        
+        # Use batching for encoding
+        batch_size = 32
+        all_embeddings = []
+        
+        for i in range(0, len(combined_texts), batch_size):
+            batch = combined_texts[i:i+batch_size]
+            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
+            all_embeddings.append(batch_embeddings)
+        
+        # Combine all embeddings
+        if all_embeddings:
+            embeddings = torch.cat(all_embeddings, dim=0)
+            return library_df, embeddings
+        
+        return library_df, None
+        
+    except Exception as e:
+        st.warning(f"Warning: Could not load library data: {e}")
+        return None, None app.py - Main MITRE ATT&CK Mapping Tool
 
 import pandas as pd
 import streamlit as st
@@ -233,26 +292,13 @@ def initialize_claude_client():
         st.error(f"Error initializing Claude client: {e}")
         return None
 
-# Function to get MITRE mapping from Claude Sonnet API with Query support
-def get_claude_mitre_mapping(description, query, mitre_techniques, client):
+# Function to get MITRE mapping from Claude Sonnet API with Query focus
+def get_claude_mitre_mapping(query, mitre_techniques, client):
     """
-    Use Claude Sonnet to map a description and query to MITRE ATT&CK techniques
+    Use Claude Sonnet to map a security query to MITRE ATT&CK techniques
     with improved accuracy and validation
     """
-    if not client:
-        return "N/A", "N/A", "N/A", [], 0.0
-    
-    # Combine description and query for mapping context
-    combined_context = ""
-    if description and description != "N/A":
-        combined_context += f"Use Case Description: {description}"
-    
-    if query and query != "N/A":
-        if combined_context:
-            combined_context += "\n\n"
-        combined_context += f"Security Query: {query}"
-    
-    if not combined_context:
+    if not client or not query or query == "N/A":
         return "N/A", "N/A", "N/A", [], 0.0
     
     # Create a lookup dictionary for technique validation
@@ -277,22 +323,21 @@ def get_claude_mitre_mapping(description, query, mitre_techniques, client):
     
     # Create a more detailed system prompt for Claude with specific examples
     system_prompt = f"""
-    You are a security analyst specialized in mapping security use cases and queries to the MITRE ATT&CK framework.
-    Given a security use case description and/or security query, you will identify the most relevant MITRE ATT&CK technique that applies to it.
+    You are a security analyst specialized in mapping security use cases to the MITRE ATT&CK framework.
+    Given a security use case Query, you will identify the most relevant MITRE ATT&CK technique that applies to it.
     
     IMPORTANT RULES:
     1. Use ONLY techniques and tactics that exist in the MITRE ATT&CK framework
     2. Be precise with the tactic name - it must be one of the standard MITRE tactics (Initial Access, Execution, Persistence, etc.)
     3. For each technique, verify that the tactic you assign is valid for that technique, as techniques can appear in multiple tactics
     4. Always check that you're using the correct tactic for the context of the use case
-    5. When analyzing security queries (like SIEM searches, database queries, etc.), focus on what the query is trying to detect rather than the query syntax itself
+    5. Focus on what the query is trying to detect rather than the query syntax itself
     
     EXAMPLES:
-    - For use cases related to malicious links being clicked, use "User Execution" technique with the "Execution" tactic
-    - For use cases about remote access tools, use "Remote Access Software" technique with the "Command and Control" tactic
-    - For use cases about credential theft, use "Credential Dumping" technique with the "Credential Access" tactic
-    - For queries looking for failed login attempts, use "Brute Force" technique with the "Credential Access" tactic
-    - For queries detecting process creation, use "User Execution" technique with the "Execution" tactic
+    - For queries detecting failed login attempts, use "Brute Force" technique with the "Credential Access" tactic
+    - For queries looking for process creation, use "User Execution" technique with the "Execution" tactic
+    - For queries detecting file modifications in system directories, use "Modify Registry" or related technique with "Defense Evasion" tactic
+    - For queries monitoring network connections to suspicious IPs, use "Command and Control" tactic with appropriate technique
     
     Your response must be a JSON object with the following format:
     {{
@@ -300,7 +345,7 @@ def get_claude_mitre_mapping(description, query, mitre_techniques, client):
         "technique_name": "name of the technique without ID",
         "technique_id": "ID of the technique (e.g., T1078)",
         "confidence": a number between 0 and 100 indicating your confidence level,
-        "explanation": "brief explanation of why this technique matches the use case and/or query"
+        "explanation": "brief explanation of why this technique matches the security query"
     }}
     
     Here are MITRE ATT&CK techniques for reference:
@@ -314,7 +359,7 @@ def get_claude_mitre_mapping(description, query, mitre_techniques, client):
             max_tokens=1000,
             system=system_prompt,
             messages=[
-                {"role": "user", "content": f"Map this security context to the MITRE ATT&CK framework: \n\n{combined_context}"}
+                {"role": "user", "content": f"Map this security query to the MITRE ATT&CK framework: \n\n{query}"}
             ],
             temperature=0.1  # Lower temperature for more deterministic results
         )
@@ -398,39 +443,33 @@ def get_claude_mitre_mapping(description, query, mitre_techniques, client):
         print(f"Error calling Claude API: {e}")
         return "API Error", str(e)[:50], "N/A", [], 0.0
 
-# Function to batch process mapping to MITRE with Claude Sonnet (Updated for Query support)
-def batch_claude_mapping(descriptions: List[str], 
-                         queries: List[str],
+# Function to batch process mapping to MITRE with Claude Sonnet (Query focused)
+def batch_claude_mapping(queries: List[str],
                          mitre_techniques: List[Dict],
                          claude_client) -> List[Tuple]:
     """
-    Map a batch of descriptions and queries to MITRE ATT&CK techniques using Claude Sonnet API
+    Map a batch of queries to MITRE ATT&CK techniques using Claude Sonnet API
     """
     if not claude_client:
-        return [("N/A", "N/A", "N/A", [], 0.0) for _ in descriptions]
+        return [("N/A", "N/A", "N/A", [], 0.0) for _ in queries]
     
     results = []
     
-    # Process each description/query pair individually with Claude
-    for i, desc in enumerate(descriptions):
-        query = queries[i] if i < len(queries) else ""
-        
-        if pd.isna(desc) or desc is None or isinstance(desc, float):
-            desc = ""
-        if pd.isna(query) or query is None or isinstance(query, float):
-            query = ""
+    # Process each query individually with Claude
+    for query in queries:
+        if pd.isna(query) or query is None or isinstance(query, float) or query == "N/A":
+            results.append(("N/A", "N/A", "N/A", [], 0.0))
+            continue
             
-        # Clean the inputs
-        clean_desc = str(desc).strip() if desc else ""
-        clean_query = str(query).strip() if query else ""
-        
-        if not clean_desc and not clean_query:
+        # Clean the query
+        clean_query = str(query).strip()
+        if not clean_query:
             results.append(("N/A", "N/A", "N/A", [], 0.0))
             continue
         
         # Get mapping from Claude Sonnet
         tactic, technique, url, tactics_list, confidence = get_claude_mitre_mapping(
-            clean_desc, clean_query, mitre_techniques, claude_client
+            clean_query, mitre_techniques, claude_client
         )
         
         results.append((tactic, technique, url, tactics_list, confidence))
@@ -580,6 +619,110 @@ def batch_check_library_matches(descriptions: List[str],
                 all_results.append((None, 0.0, "No match found in library"))
     
     return all_results
+def batch_check_library_matches(queries: List[str],
+                              library_df: pd.DataFrame,
+                              library_embeddings: torch.Tensor,
+                              _model: SentenceTransformer,
+                              batch_size: int = 32,
+                              similarity_threshold: float = 0.8) -> List[Tuple]:
+    """
+    Check for matches in the library in batches for better performance.
+    Now focuses on Query matching only.
+    Returns a list of tuples: (matched_row, score, match_message)
+    """
+    if library_df is None or library_df.empty or library_embeddings is None:
+        return [(None, 0.0, "No library data available") for _ in queries]
+    
+    results = []
+    
+    # First try exact matches (fast text comparison) - only on queries
+    exact_matches = {}
+    for i, query in enumerate(queries):
+        # Handle NaN, None or float values
+        if pd.isna(query) or query is None or isinstance(query, float) or query == "N/A":
+            exact_matches[i] = (None, 0.0, "No query available")
+            continue
+            
+        # Convert to lowercase for case-insensitive matching
+        try:
+            lower_query = str(query).lower()
+            
+            # Check if there's an exact match in library (checking query column if available)
+            if 'Query' in library_df.columns:
+                matches = library_df[library_df['Query'].fillna('').str.lower() == lower_query]
+                if not matches.empty:
+                    exact_matches[i] = (matches.iloc[0], 1.0, "Exact query match found in library")
+                    continue
+        except Exception as e:
+            # Handle any errors in string operations
+            exact_matches[i] = (None, 0.0, f"Error processing query: {str(e)}")
+    
+    # Process queries in batches for embeddings
+    remaining_indices = [i for i in range(len(queries)) if i not in exact_matches]
+    
+    # Validate remaining queries for encoding
+    valid_indices = []
+    valid_queries = []
+    
+    for idx in remaining_indices:
+        query = queries[idx]
+        
+        # Handle None or non-string values
+        if pd.isna(query) or query is None or isinstance(query, float) or query == "N/A":
+            results.append((idx, (None, 0.0, "No valid query available")))
+        else:
+            query_text = str(query).strip()
+            if query_text:
+                valid_indices.append(idx)
+                valid_queries.append(query_text)
+            else:
+                results.append((idx, (None, 0.0, "Empty query")))
+    
+    # Skip if no valid queries remain
+    if not valid_queries:
+        return [exact_matches.get(i, (None, 0.0, "No match found in library")) for i in range(len(queries))]
+    
+    # Encode in batches
+    for i in range(0, len(valid_queries), batch_size):
+        batch = valid_queries[i:i+batch_size]
+        try:
+            batch_embeddings = _model.encode(batch, convert_to_tensor=True)
+            
+            # Perform search for this batch using PyTorch
+            for j, query_embedding in enumerate(batch_embeddings):
+                best_score, best_idx = cosine_similarity_search(query_embedding, library_embeddings)
+                
+                orig_idx = valid_indices[i + j]
+                
+                if best_score >= similarity_threshold:
+                    results.append((orig_idx, (library_df.iloc[best_idx], best_score, 
+                                f"Similar query match found in library (score: {best_score:.2f})")))
+                else:
+                    results.append((orig_idx, (None, 0.0, "No similar query found in library")))
+        except Exception as e:
+            # Handle encoding errors
+            for j in range(len(batch)):
+                if i+j < len(valid_indices):
+                    orig_idx = valid_indices[i + j]
+                    results.append((orig_idx, (None, 0.0, f"Error during embedding: {str(e)}")))
+    
+    # Combine exact matches and embedding-based matches
+    all_results = []
+    for i in range(len(queries)):
+        if i in exact_matches:
+            all_results.append(exact_matches[i])
+        else:
+            # Find the result for this index
+            result_found = False
+            for idx, result in results:
+                if idx == i:
+                    all_results.append(result)
+                    result_found = True
+                    break
+            if not result_found:
+                all_results.append((None, 0.0, "No match found in library"))
+    
+    return all_results
 
 # Main optimized mapping processing function (Updated for Query support)
 def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
@@ -589,12 +732,457 @@ def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df,
     This version uses:
     - all-mpnet-base-v2 for library matching
     - Claude Sonnet for MITRE ATT&CK technique mapping with validation
-    - Now supports Query column for enhanced mapping context
+    - Now supports Query column for enhanced mapping context, but mapping is done based on Query only
     """
     # Fixed similarity threshold
     similarity_threshold = 0.8
     
     # Create lookup dictionaries for faster validation
+    technique_id_to_name = {}
+    technique_name_to_id = {}
+    technique_to_tactics = {}
+    
+    for tech in mitre_techniques:
+        technique_id_to_name[tech['id']] = tech['name']
+        technique_name_to_id[tech['name'].lower()] = tech['id']
+        technique_to_tactics[tech['name'].lower()] = set(tech['tactics_list'])
+    
+    # Get all descriptions and queries at once and validate them
+    descriptions = []
+    queries = []
+    
+    for desc in df['Description'].tolist():
+        if pd.isna(desc) or desc is None or isinstance(desc, float):
+            descriptions.append("No description available")
+        else:
+            descriptions.append(str(desc))
+    
+    # Handle Query column if it exists
+    if 'Query' in df.columns:
+        for query in df['Query'].tolist():
+            if pd.isna(query) or query is None or isinstance(query, float):
+                queries.append("")
+            else:
+                queries.append(str(query))
+    else:
+        queries = [""] * len(descriptions)
+    
+    # First batch check library matches (using sentence-transformers model with query support)
+    library_match_results = batch_check_library_matches(
+        descriptions, queries, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
+    )
+    
+    # Initialize Claude Sonnet client
+    claude_client = initialize_claude_client()
+    
+    # Prepare lists for rows that need model mapping
+    model_map_indices = []
+    model_map_queries = []
+    
+    # Process results and collect cases needing model mapping
+    tactics = []
+    techniques = []
+    references = []
+    all_tactics_lists = []
+    confidence_scores = []
+    match_sources = []
+    match_scores = []
+    techniques_count = {}
+    
+    # Make sure all lists have entries for each row in the dataframe
+    for _ in range(len(df)):
+        tactics.append("N/A")
+        techniques.append("N/A")
+        references.append("N/A")
+        all_tactics_lists.append([])
+        confidence_scores.append(0)
+        match_sources.append("N/A")
+        match_scores.append(0)
+    
+    for i, library_match in enumerate(library_match_results):
+        matched_row, match_score, match_source = library_match
+        
+        if matched_row is not None:
+            # Use library match
+            tactic = matched_row.get('Mapped MITRE Tactic(s)', 'N/A')
+            technique = matched_row.get('Mapped MITRE Technique(s)', 'N/A')
+            reference = matched_row.get('Reference Resource(s)', 'N/A')
+            
+            # Validate the tactic-technique relationship
+            validated_tactic = tactic
+            validated_technique = technique
+            
+            # Check if the technique is in our reference data
+            if technique != 'N/A':
+                # Extract the technique name (removing ID if present)
+                if ' - ' in technique:
+                    tech_name = technique.split(' - ')[1].strip().lower()
+                elif '-' in technique and technique[0] == 'T':
+                    tech_id = technique.split('-')[0].strip()
+                    if tech_id in technique_id_to_name:
+                        tech_name = technique_id_to_name[tech_id].lower()
+                    else:
+                        tech_name = technique.lower()
+                else:
+                    tech_name = technique.lower()
+                
+                # Check if this technique has valid tactics and if the assigned tactic is valid
+                if tech_name in technique_to_tactics:
+                    valid_tactics = technique_to_tactics[tech_name]
+                    
+                    # If tactic is a comma-separated list, check each tactic
+                    if ',' in tactic:
+                        tactic_list = [t.strip() for t in tactic.split(',')]
+                        validated_tactics = []
+                        
+                        for t in tactic_list:
+                            if t in valid_tactics:
+                                validated_tactics.append(t)
+                        
+                        if validated_tactics:
+                            validated_tactic = ', '.join(validated_tactics)
+                    else:
+                        # Single tactic case
+                        if tactic not in valid_tactics and valid_tactics:
+                            # If the tactic is invalid, use the first valid tactic
+                            validated_tactic = list(valid_tactics)[0]
+            
+            tactics_list = validated_tactic.split(', ') if validated_tactic != 'N/A' else []
+            confidence = match_score
+            
+            # Store results with validated data
+            tactics[i] = validated_tactic
+            techniques[i] = validated_technique
+            references[i] = reference
+            all_tactics_lists[i] = tactics_list
+            confidence_scores[i] = round(confidence * 100, 2)
+            match_sources[i] = match_source
+            match_scores[i] = round(match_score * 100, 2)
+            
+            # Count techniques
+            if validated_technique != 'N/A':
+                # Extract the technique ID
+                if ' - ' in validated_technique:
+                    parts = validated_technique.split(' - ')
+                    tech_id = parts[0].strip()
+                    tech_name = parts[1].strip().lower()
+                elif validated_technique.startswith('T') and len(validated_technique) >= 5:
+                    # Looks like an ID
+                    tech_id = validated_technique
+                else:
+                    # Assume it's a name and look it up
+                    tech_name = validated_technique.lower()
+                    if tech_name in technique_name_to_id:
+                        tech_id = technique_name_to_id[tech_name]
+                    else:
+                        # Fall back to using the name as is
+                        tech_id = validated_technique
+                
+                techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
+        else:
+            # Check if we have valid query for mapping (only query-based mapping now)
+            has_valid_query = i < len(queries) and queries[i] and not pd.isna(queries[i]) and queries[i].strip()
+            
+            if has_valid_query:
+                # Mark for model mapping
+                model_map_indices.append(i)
+                model_map_queries.append(queries[i])
+            else:
+                # Invalid or missing query
+                match_sources[i] = "Invalid or missing query"
+    
+    # Batch map remaining cases using Claude Sonnet (Query-based only)
+    if model_map_queries:
+        # Progress indicator for Claude API calls
+        claude_progress = st.progress(0)
+        st.write("Using Claude Sonnet for query-based mappings...")
+        
+        model_results = []
+        
+        # Process in smaller batches to update progress
+        batch_size = 5  # Smaller batch size to show progress more frequently
+        total_batches = (len(model_map_queries) + batch_size - 1) // batch_size
+        
+        for b in range(total_batches):
+            start_idx = b * batch_size
+            end_idx = min((b + 1) * batch_size, len(model_map_queries))
+            
+            batch_queries = model_map_queries[start_idx:end_idx]
+            batch_results = batch_claude_mapping(
+                batch_queries, mitre_techniques, claude_client
+            )
+            
+            model_results.extend(batch_results)
+            
+            # Update progress
+            progress = (b + 1) / total_batches
+            claude_progress.progress(progress)
+        
+        # Process Claude results and insert at the correct positions
+        for (i, idx) in enumerate(model_map_indices):
+            if i < len(model_results):
+                tactic, technique_name, reference, tactics_list, confidence = model_results[i]
+                
+                # Store the results
+                tactics[idx] = tactic
+                techniques[idx] = technique_name
+                references[idx] = reference
+                all_tactics_lists[idx] = tactics_list
+                confidence_scores[idx] = round(confidence * 100, 2)
+                match_sources[idx] = "Claude AI query mapping"
+                match_scores[idx] = 0  # No library match score
+                
+                # Count techniques - find technique ID if possible
+                if technique_name.lower() in technique_name_to_id:
+                    tech_id = technique_name_to_id[technique_name.lower()]
+                else:
+                    # Try to find by name similarity
+                    found_id = None
+                    for tech in mitre_techniques:
+                        if tech['name'].lower() == technique_name.lower():
+                            found_id = tech['id']
+                            break
+                    
+                    tech_id = found_id or technique_name
+                
+                if tech_id != "N/A" and tech_id != "Error":
+                    techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
+    
+    # Add results to dataframe
+    df['Mapped MITRE Tactic(s)'] = tactics
+    df['Mapped MITRE Technique(s)'] = techniques
+    df['Reference Resource(s)'] = references
+    df['Confidence Score (%)'] = confidence_scores
+    df['Match Source'] = match_sources
+    df['Library Match Score (%)'] = match_scores
+    
+    return df, techniques_count
+def process_mappings(df, _model, mitre_techniques, mitre_embeddings, library_df, library_embeddings):
+    """
+    Main function to process mappings in an optimized way
+    
+    This version uses:
+    - all-mpnet-base-v2 for library matching based on queries
+    - Claude Sonnet for MITRE ATT&CK technique mapping with validation based on queries
+    - Focus on Query column for mapping (required)
+    """
+    # Check if Query column exists
+    if 'Query' not in df.columns:
+        st.error("Query column is required for mapping. Please ensure your CSV has a 'Query' column.")
+        return df, {}
+    
+    # Fixed similarity threshold
+    similarity_threshold = 0.8
+    
+    # Create lookup dictionaries for faster validation
+    technique_id_to_name = {}
+    technique_name_to_id = {}
+    technique_to_tactics = {}
+    
+    for tech in mitre_techniques:
+        technique_id_to_name[tech['id']] = tech['name']
+        technique_name_to_id[tech['name'].lower()] = tech['id']
+        technique_to_tactics[tech['name'].lower()] = set(tech['tactics_list'])
+    
+    # Get all queries and validate them
+    queries = []
+    
+    for query in df['Query'].tolist():
+        if pd.isna(query) or query is None or isinstance(query, float):
+            queries.append("N/A")
+        else:
+            queries.append(str(query))
+    
+    # First batch check library matches (using sentence-transformers model with query focus)
+    library_match_results = batch_check_library_matches(
+        queries, library_df, library_embeddings, _model, similarity_threshold=similarity_threshold
+    )
+    
+    # Initialize Claude Sonnet client
+    claude_client = initialize_claude_client()
+    
+    # Prepare lists for rows that need model mapping
+    model_map_indices = []
+    model_map_queries = []
+    
+    # Process results and collect cases needing model mapping
+    tactics = []
+    techniques = []
+    references = []
+    all_tactics_lists = []
+    confidence_scores = []
+    match_sources = []
+    match_scores = []
+    techniques_count = {}
+    
+    # Make sure all lists have entries for each row in the dataframe
+    for _ in range(len(df)):
+        tactics.append("N/A")
+        techniques.append("N/A")
+        references.append("N/A")
+        all_tactics_lists.append([])
+        confidence_scores.append(0)
+        match_sources.append("N/A")
+        match_scores.append(0)
+    
+    for i, library_match in enumerate(library_match_results):
+        matched_row, match_score, match_source = library_match
+        
+        if matched_row is not None:
+            # Use library match
+            tactic = matched_row.get('Mapped MITRE Tactic(s)', 'N/A')
+            technique = matched_row.get('Mapped MITRE Technique(s)', 'N/A')
+            reference = matched_row.get('Reference Resource(s)', 'N/A')
+            
+            # Validate the tactic-technique relationship
+            validated_tactic = tactic
+            validated_technique = technique
+            
+            # Check if the technique is in our reference data
+            if technique != 'N/A':
+                # Extract the technique name (removing ID if present)
+                if ' - ' in technique:
+                    tech_name = technique.split(' - ')[1].strip().lower()
+                elif '-' in technique and technique[0] == 'T':
+                    tech_id = technique.split('-')[0].strip()
+                    if tech_id in technique_id_to_name:
+                        tech_name = technique_id_to_name[tech_id].lower()
+                    else:
+                        tech_name = technique.lower()
+                else:
+                    tech_name = technique.lower()
+                
+                # Check if this technique has valid tactics and if the assigned tactic is valid
+                if tech_name in technique_to_tactics:
+                    valid_tactics = technique_to_tactics[tech_name]
+                    
+                    # If tactic is a comma-separated list, check each tactic
+                    if ',' in tactic:
+                        tactic_list = [t.strip() for t in tactic.split(',')]
+                        validated_tactics = []
+                        
+                        for t in tactic_list:
+                            if t in valid_tactics:
+                                validated_tactics.append(t)
+                        
+                        if validated_tactics:
+                            validated_tactic = ', '.join(validated_tactics)
+                    else:
+                        # Single tactic case
+                        if tactic not in valid_tactics and valid_tactics:
+                            # If the tactic is invalid, use the first valid tactic
+                            validated_tactic = list(valid_tactics)[0]
+            
+            tactics_list = validated_tactic.split(', ') if validated_tactic != 'N/A' else []
+            confidence = match_score
+            
+            # Store results with validated data
+            tactics[i] = validated_tactic
+            techniques[i] = validated_technique
+            references[i] = reference
+            all_tactics_lists[i] = tactics_list
+            confidence_scores[i] = round(confidence * 100, 2)
+            match_sources[i] = match_source
+            match_scores[i] = round(match_score * 100, 2)
+            
+            # Count techniques
+            if validated_technique != 'N/A':
+                # Extract the technique ID
+                if ' - ' in validated_technique:
+                    parts = validated_technique.split(' - ')
+                    tech_id = parts[0].strip()
+                    tech_name = parts[1].strip().lower()
+                elif validated_technique.startswith('T') and len(validated_technique) >= 5:
+                    # Looks like an ID
+                    tech_id = validated_technique
+                else:
+                    # Assume it's a name and look it up
+                    tech_name = validated_technique.lower()
+                    if tech_name in technique_name_to_id:
+                        tech_id = technique_name_to_id[tech_name]
+                    else:
+                        # Fall back to using the name as is
+                        tech_id = validated_technique
+                
+                techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
+        else:
+            # Check if we have valid query for mapping
+            has_valid_query = queries[i] != "N/A" and not pd.isna(queries[i]) and queries[i].strip()
+            
+            if has_valid_query:
+                # Mark for model mapping
+                model_map_indices.append(i)
+                model_map_queries.append(queries[i])
+            else:
+                # Invalid query placeholder is already set by default
+                match_sources[i] = "Invalid or missing query"
+    
+    # Batch map remaining cases using Claude Sonnet
+    if model_map_queries:
+        # Progress indicator for Claude API calls
+        claude_progress = st.progress(0)
+        st.write("Using Claude Sonnet for query-based mappings...")
+        
+        model_results = []
+        
+        # Process in smaller batches to update progress
+        batch_size = 5  # Smaller batch size to show progress more frequently
+        total_batches = (len(model_map_queries) + batch_size - 1) // batch_size
+        
+        for b in range(total_batches):
+            start_idx = b * batch_size
+            end_idx = min((b + 1) * batch_size, len(model_map_queries))
+            
+            batch_queries = model_map_queries[start_idx:end_idx]
+            batch_results = batch_claude_mapping(
+                batch_queries, mitre_techniques, claude_client
+            )
+            
+            model_results.extend(batch_results)
+            
+            # Update progress
+            progress = (b + 1) / total_batches
+            claude_progress.progress(progress)
+        
+        # Process Claude results and insert at the correct positions
+        for (i, idx) in enumerate(model_map_indices):
+            if i < len(model_results):
+                tactic, technique_name, reference, tactics_list, confidence = model_results[i]
+                
+                # Store the results
+                tactics[idx] = tactic
+                techniques[idx] = technique_name
+                references[idx] = reference
+                all_tactics_lists[idx] = tactics_list
+                confidence_scores[idx] = round(confidence * 100, 2)
+                match_sources[idx] = "Claude AI query mapping"
+                match_scores[idx] = 0  # No library match score
+                
+                # Count techniques - find technique ID if possible
+                if technique_name.lower() in technique_name_to_id:
+                    tech_id = technique_name_to_id[technique_name.lower()]
+                else:
+                    # Try to find by name similarity
+                    found_id = None
+                    for tech in mitre_techniques:
+                        if tech['name'].lower() == technique_name.lower():
+                            found_id = tech['id']
+                            break
+                    
+                    tech_id = found_id or technique_name
+                
+                if tech_id != "N/A" and tech_id != "Error":
+                    techniques_count[tech_id] = techniques_count.get(tech_id, 0) + 1
+    
+    # Add results to dataframe
+    df['Mapped MITRE Tactic(s)'] = tactics
+    df['Mapped MITRE Technique(s)'] = techniques
+    df['Reference Resource(s)'] = references
+    df['Confidence Score (%)'] = confidence_scores
+    df['Match Source'] = match_sources
+    df['Library Match Score (%)'] = match_scores
+    
+    return df, techniques_count
     technique_id_to_name = {}
     technique_name_to_id = {}
     technique_to_tactics = {}
@@ -892,7 +1480,7 @@ def get_mitre_embeddings(_model, techniques):
         st.error(f"Error computing embeddings: {e}")
         return None
 
-# Optimized function to load and cache library data with embeddings (Updated for Query support)
+# Optimized function to load and cache library data with embeddings (Query focused)
 @st.cache_data
 def load_library_data_with_embeddings(_model):
     try:
@@ -901,7 +1489,7 @@ def load_library_data_with_embeddings(_model):
             library_df = pd.read_csv("library.csv")
         except:
             st.warning("Could not load library.csv file. Starting with an empty library.")
-            # Create an empty DataFrame with required columns (now including Query)
+            # Create an empty DataFrame with required columns (now requiring Query)
             library_df = pd.DataFrame(columns=['Use Case Name', 'Description', 'Log Source', 
                                                'Mapped MITRE Tactic(s)', 'Mapped MITRE Technique(s)', 
                                                'Reference Resource(s)', 'Query'])
@@ -914,31 +1502,28 @@ def load_library_data_with_embeddings(_model):
             if library_df[col].dtype == 'object':
                 library_df[col] = library_df[col].fillna("N/A")
         
-        # Precompute embeddings for all library entries (combine description and query)
-        combined_texts = []
+        # Precompute embeddings for all library entries (focus on Query column)
+        query_texts = []
         for _, row in library_df.iterrows():
-            desc = row.get('Description', '')
-            query = row.get('Query', '') if 'Query' in row else ''
+            query = row.get('Query', '')
             
             # Handle NaN values
-            if pd.isna(desc) or isinstance(desc, float):
-                desc = "No description available"
-            if pd.isna(query) or isinstance(query, float):
-                query = ""
-            
-            # Combine description and query for embedding
-            combined_text = str(desc)
-            if query:
-                combined_text += " " + str(query)
-            
-            combined_texts.append(combined_text)
+            if pd.isna(query) or isinstance(query, float) or query == 'N/A':
+                # If no query, fall back to description for embedding
+                desc = row.get('Description', '')
+                if pd.isna(desc) or isinstance(desc, float):
+                    query_texts.append("No query or description available")
+                else:
+                    query_texts.append(str(desc))
+            else:
+                query_texts.append(str(query))
         
         # Use batching for encoding
         batch_size = 32
         all_embeddings = []
         
-        for i in range(0, len(combined_texts), batch_size):
-            batch = combined_texts[i:i+batch_size]
+        for i in range(0, len(query_texts), batch_size):
+            batch = query_texts[i:i+batch_size]
             batch_embeddings = _model.encode(batch, convert_to_tensor=True)
             all_embeddings.append(batch_embeddings)
         
@@ -1058,21 +1643,21 @@ def main():
         st.markdown("---")
         st.markdown("### About")
         st.markdown("""
-        This tool maps your security use cases and queries to the MITRE ATT&CK framework using:
+        This tool maps your security use cases to the MITRE ATT&CK framework using:
         
-        1. Library matching for known use cases
-        2. Claude Sonnet AI for new use cases mapping
+        1. Library matching for known use cases and queries
+        2. Claude Sonnet AI for new query/use case mapping
         3. Suggestions for additional use cases based on your log sources
         
-        - Upload a CSV with security use cases and queries
-        - Get automatic MITRE ATT&CK mappings
+        - Upload a CSV with security use cases (and optional queries)
+        - Get automatic MITRE ATT&CK mappings based on queries or descriptions
         - View suggested additional use cases
         - Visualize your coverage
         - Export for MITRE Navigator
         """)
         
         st.markdown("---")
-        st.markdown("© 2025 | v1.6.0 (Query Support)")
+        st.markdown("© 2025 | v1.7.0 (Query-Focused Mapping)")
 
     # Home page
     if st.session_state.page == "home":
@@ -1108,7 +1693,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
         if lottie_upload:
             st_lottie(lottie_upload, height=200, key="upload_animation")
         
-        st.markdown("Upload a CSV file containing your security use cases. The file should include the columns: 'Use Case Name', 'Description', 'Log Source', and optionally 'Query'.")
+        st.markdown("Upload a CSV file containing your security use cases. The file should include the columns: 'Use Case Name', 'Description', 'Log Source', and 'Query'. The Query column will be used for MITRE ATT&CK mapping.")
         
         uploaded_file = st.file_uploader("Choose a CSV file", type="csv", key="file_upload")
         
@@ -1119,19 +1704,19 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
                 # Store the uploaded file in session state for later use in suggestions
                 st.session_state._uploaded_file = uploaded_file
                 
-                # Check for required columns - Query is now optional
+                # Check for required columns - Query is optional but used for mapping
                 required_cols = ['Use Case Name', 'Description', 'Log Source']
                 optional_cols = ['Query']
                 
                 if not all(col in df.columns for col in required_cols):
                     st.error(f"Your CSV must contain the columns: {', '.join(required_cols)}")
-                    st.info(f"Optional columns: {', '.join(optional_cols)}")
+                    st.info(f"Optional column (used for mapping): {', '.join(optional_cols)}")
                 else:
                     st.session_state.file_uploaded = True
                     
                     # Check if Query column exists
                     has_query_col = 'Query' in df.columns
-                    query_info = f" (with Query column)" if has_query_col else " (without Query column)"
+                    query_info = f" (with Query column for enhanced mapping)" if has_query_col else " (Query column missing - mapping will use descriptions)"
                     
                     st.success(f"File uploaded successfully! {len(df)} security use cases found{query_info}.")
                     
@@ -1141,10 +1726,10 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
                             df[col] = df[col].fillna("N/A")
                     
                     st.markdown("""
-                    1. **Upload** your security use cases CSV file (with optional Query column)
+                    1. **Upload** your security use cases CSV file
                     2. The tool first **checks** if the use case exists in the library
                     3. If found in library, it uses the **pre-mapped** MITRE data
-                    4. If not found, it uses **Claude Sonnet AI** to analyze the use case and/or query
+                    4. If not found, it uses **Claude Sonnet AI** to analyze the security query (if available) or description
                     5. **View** mapped results, analytics, and export options
                     6. **Discover** additional relevant use cases based on your log sources
                     """)
@@ -1226,7 +1811,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             - 'Use Case Name': Name of the security use case
             - 'Description': Detailed description of the use case
             - 'Log Source': The log source for the use case
-            - 'Query' (Optional): Security query/rule for the use case
+            - 'Query' (Optional but recommended): Security query/rule for the use case
             
             You'll also need:
             - An Anthropic API key for Claude Sonnet
@@ -1237,7 +1822,7 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             1. **Upload** your security use cases CSV file (with optional Query column)
             2. The tool first **checks** if the use case exists in the library using all-mpnet-base-v2
             3. If found in library, it uses the **pre-mapped** MITRE data
-            4. If not found, it uses **Claude Sonnet AI** to analyze the use case and query
+            4. If not found, it uses **Claude Sonnet AI** to analyze the security query (if available) or description
             5. **View** mapped results, analytics, and export options
             6. **Discover** additional relevant use cases based on your log sources
             """)
@@ -1247,10 +1832,10 @@ def render_home_page(model, mitre_techniques, library_df, library_embeddings):
             This tool leverages two AI models:
             
             - **all-mpnet-base-v2**: Used for library matching, suggestions, and other embedding tasks
-            - **Claude Sonnet**: Used for mapping use cases and queries to MITRE ATT&CK techniques
+            - **Claude Sonnet**: Used for mapping security queries (preferred) or descriptions to MITRE ATT&CK techniques
             
-            Claude Sonnet provides more accurate and context-aware mapping than traditional embedding models, 
-            and can now analyze both descriptions and security queries for enhanced mapping accuracy.
+            Claude Sonnet provides accurate mapping by focusing on what security queries are designed to detect,
+            making it ideal for mapping detection rules, SIEM queries, and other security logic to MITRE techniques.
             """)
 
 def render_results_page():
